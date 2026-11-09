@@ -1,0 +1,2 @@
+// The executable's icon (tools/win.mjs makes app.ico from host.json's app.icon).
+1 ICON "@HOST_WIN_ICON@"

@@ -1,0 +1,8 @@
+import test from 'node:test'; import assert from 'node:assert/strict'
+import { URL, URLSearchParams } from '../src/fetch/url.js'
+test('absolute', () => { const u = new URL('https://Example.com:443/a/./b/../c?x=1#h'); assert.equal(u.href, 'https://example.com/a/c?x=1#h'); assert.equal(u.origin, 'https://example.com'); assert.equal(u.pathname, '/a/c'); assert.equal(u.searchParams.get('x'), '1') })
+test('relative', () => { const b = 'https://app.local/assets/index-abc.js'; assert.equal(new URL('./chunk.js', b).href, 'https://app.local/assets/chunk.js'); assert.equal(new URL('../gltf/x.glb', b).href, 'https://app.local/gltf/x.glb'); assert.equal(new URL('/basis/t.wasm', b).href, 'https://app.local/basis/t.wasm'); assert.equal(new URL('?q=1', b).href, 'https://app.local/assets/index-abc.js?q=1'); assert.equal(new URL('', b).href, b) })
+test('blob and data', () => { assert.equal(new URL('blob:https://app.local/uuid-1').origin, 'https://app.local'); assert.equal(new URL('data:text/plain,hi').protocol, 'data:'); assert.equal(new URL('data:text/plain,hi').pathname, 'text/plain,hi') })
+test('port and setters', () => { const u = new URL('http://h:8080/p'); assert.equal(u.port, '8080'); u.port = '80'; assert.equal(u.href, 'http://h/p'); u.hash = 'x'; u.search = 'a=b'; assert.equal(u.href, 'http://h/p?a=b#x') })
+test('searchParams', () => { const p = new URLSearchParams('a=1&b=2&a=3'); assert.deepEqual(p.getAll('a'), ['1', '3']); p.set('a', 'z'); assert.equal(p.toString(), 'a=z&b=2'); const u = new URL('https://x/?k=v'); u.searchParams.append('n', 'm o'); assert.equal(u.search, '?k=v&n=m+o') })
+test('invalid', () => { assert.throws(() => new URL('nope')); assert.equal(URL.canParse('nope'), false) })

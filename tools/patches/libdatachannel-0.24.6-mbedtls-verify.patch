@@ -1,0 +1,68 @@
+diff -ru a/src/impl/tlstransport.cpp b/src/impl/tlstransport.cpp
+--- a/src/impl/tlstransport.cpp	2026-11-03 21:55:58
++++ b/src/impl/tlstransport.cpp	2026-11-03 21:55:58
+@@ -15,6 +15,7 @@
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <cstdlib>
+ #include <cstring>
+ #include <exception>
+ 
+@@ -329,6 +330,7 @@
+ 	mbedtls_ctr_drbg_init(&mDrbg);
+ 	mbedtls_ssl_init(&mSsl);
+ 	mbedtls_ssl_config_init(&mConf);
++	mbedtls_x509_crt_init(&mCaChain);
+ 	mbedtls_ctr_drbg_set_prediction_resistance(&mDrbg, MBEDTLS_CTR_DRBG_PR_ON);
+ 
+ 	try {
+@@ -340,6 +342,21 @@
+ 
+ 		mbedtls_ssl_conf_max_version(&mConf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3); // TLS 1.2
+ 		mbedtls_ssl_conf_authmode(&mConf, MBEDTLS_SSL_VERIFY_NONE);
++		// webxr-host: a client that knows the server's name verifies its certificate against the CAs RTC_CA_PATH names
++		// (a PEM file, or a directory of them: Android's cacerts); without one it stays unverified, as upstream.
++		if (mIsClient && mHost) {
++			const char *caPath = std::getenv("RTC_CA_PATH");
++			if (caPath && *caPath) {
++				int r = mbedtls_x509_crt_parse_path(&mCaChain, caPath);
++				if (r < 0) r = mbedtls_x509_crt_parse_file(&mCaChain, caPath);
++				if (r >= 0 && mCaChain.version != 0) {
++					mbedtls_ssl_conf_ca_chain(&mConf, &mCaChain, NULL);
++					mbedtls_ssl_conf_authmode(&mConf, MBEDTLS_SSL_VERIFY_REQUIRED);
++				} else {
++					PLOG_WARNING << "No CA certificates loaded from " << caPath << "; the server is not verified";
++				}
++			}
++		}
+ 		mbedtls_ssl_conf_rng(&mConf, mbedtls_ctr_drbg_random, &mDrbg);
+ 
+ 		if (certificate) {
+@@ -360,6 +377,7 @@
+ 		mbedtls_ctr_drbg_free(&mDrbg);
+ 		mbedtls_ssl_free(&mSsl);
+ 		mbedtls_ssl_config_free(&mConf);
++		mbedtls_x509_crt_free(&mCaChain);
+ 		throw;
+ 	}
+ }
+@@ -372,6 +390,7 @@
+ 	mbedtls_ctr_drbg_free(&mDrbg);
+ 	mbedtls_ssl_free(&mSsl);
+ 	mbedtls_ssl_config_free(&mConf);
++	mbedtls_x509_crt_free(&mCaChain);
+ }
+ 
+ void TlsTransport::start() {
+diff -ru a/src/impl/tlstransport.hpp b/src/impl/tlstransport.hpp
+--- a/src/impl/tlstransport.hpp	2026-11-03 21:55:58
++++ b/src/impl/tlstransport.hpp	2026-11-03 21:55:58
+@@ -71,6 +71,7 @@
+ 	mbedtls_ctr_drbg_context mDrbg;
+ 	mbedtls_ssl_config mConf;
+ 	mbedtls_ssl_context mSsl;
++	mbedtls_x509_crt mCaChain; // webxr-host: the system's CAs (RTC_CA_PATH), for verifying a server
+ 
+ 	std::recursive_mutex mSslMutex;
+ 	std::atomic<bool> mOutgoingResult = true;

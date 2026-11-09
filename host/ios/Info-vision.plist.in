@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+  <key>CFBundleDisplayName</key><string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+  <key>CFBundleIdentifier</key><string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+  <key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+  <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+  <key>CFBundleIcons</key><dict><key>CFBundlePrimaryIcon</key><dict>
+    <key>CFBundleIconFiles</key><array><string>AppIcon60x60</string><string>AppIcon76x76</string></array>
+    <key>CFBundleIconName</key><string>AppIcon</string></dict></dict>
+  <key>CFBundleSupportedPlatforms</key><array><string>XROS</string></array>
+  <key>MinimumOSVersion</key><string>2.0</string>
+  <key>UIDeviceFamily</key><array><integer>7</integer></array>
+  <key>UILaunchScreen</key><dict/>
+  <key>UIApplicationSceneManifest</key><dict>
+    <key>UIApplicationSupportsMultipleScenes</key><true/>
+    <key>UIApplicationPreferredDefaultSceneSessionRole</key><string>UIWindowSceneSessionRoleApplication</string>
+    <key>UISceneConfigurations</key><dict>
+      <key>CPSceneSessionRoleImmersiveSpaceApplication</key><array><dict>
+        <key>UISceneInitialImmersionStyle</key><string>UIImmersionStyleMixed</string>
+      </dict></array>
+    </dict>
+  </dict>
+  <key>NSWorldSensingUsageDescription</key><string>The game places its playfield in your room.</string>
+  <key>NSHandsTrackingUsageDescription</key><string>Your hands aim and fire.</string>
+  <key>UIApplicationSupportsIndirectInputEvents</key><true/>
+</dict></plist>

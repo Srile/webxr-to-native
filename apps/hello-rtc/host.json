@@ -1,0 +1,28 @@
+{
+  "app": {
+    "name": "hello-rtc",
+    "package": "gg.dmnshd.webxrhost.hellortc"
+  },
+  "mode": "js",
+  "web": {
+    "origin": "https://app.local",
+    "query": ""
+  },
+  "network": {
+    "allow": [
+      "wss://echo.websocket.org",
+      "wss://self-signed.badssl.com"
+    ],
+    "webrtc": true
+  },
+  "android": {
+    "formFactor": "phone"
+  },
+  "xr": {
+    "autoEnter": false
+  },
+  "debug": {
+    "inspector": true,
+    "port": 9229
+  }
+}

@@ -1,0 +1,5 @@
+// atob/btoa shared by the window and worker preludes (V8 has neither).
+const invalidChar = (m) => { const D = globalThis.DOMException; if (D) return new D(m, 'InvalidCharacterError'); const e = new Error(m); e.name = 'InvalidCharacterError'; return e }
+const T = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+export const atob = (s) => { s = String(s).replace(/[\s=]+$/g, '').replace(/\s/g, ''); let out = '', bits = 0, acc = 0; for (const c of s) { const v = T.indexOf(c); if (v < 0) throw invalidChar('invalid character', 'InvalidCharacterError'); acc = (acc << 6) | v; bits += 6; if (bits >= 8) { bits -= 8; out += String.fromCharCode((acc >> bits) & 255) } } return out }
+export const btoa = (s) => { s = String(s); let out = ''; for (let i = 0; i < s.length; i += 3) { const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2); if (a > 255 || b > 255 || c > 255) throw invalidChar('invalid character', 'InvalidCharacterError'); const v = (a << 16) | ((b || 0) << 8) | (c || 0); out += T[v >> 18] + T[(v >> 12) & 63] + (isNaN(b) ? '=' : T[(v >> 6) & 63]) + (isNaN(c) ? '=' : T[v & 63]) } return out }

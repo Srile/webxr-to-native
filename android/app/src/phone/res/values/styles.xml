@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The phone build draws edge to edge, under the display cutout too (no black bar beside the camera); the page
+         keeps its UI clear of it through the safe-area insets the host reports (host/android/display.cpp). -->
+    <style name="PhoneTheme" parent="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

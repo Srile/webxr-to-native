@@ -1,0 +1,7 @@
+{
+  "app": { "name": "bench materials", "package": "gg.dmnshd.webxrhost.bench.materials" },
+  "mode": "js",
+  "web": { "dist": "../../dist/materials", "origin": "https://bench.local", "query": "" },
+  "xr": { "autoEnter": true, "preferredRate": 72 },
+  "debug": { "inspector": true, "port": 9229 }
+}

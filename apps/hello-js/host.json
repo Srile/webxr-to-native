@@ -1,0 +1,8 @@
+{
+  "app": { "name": "hello-js", "package": "gg.dmnshd.webxrhost.hellojs" },
+  "mode": "js",
+  "web": { "origin": "https://app.local", "query": "" },
+  "network": { "allow": ["https://example.com"] },
+  "xr": { "autoEnter": false },
+  "debug": { "inspector": true, "port": 9229 }
+}

@@ -1,0 +1,35 @@
+plugins { id 'com.android.application' }
+
+def hostPackage = project.property('host.package')
+def hostAppName = project.property('host.appName')
+// The OS splash (assets/vr_splash.png, staged by tools/pack.mjs from host.json app.splash).
+def hostOsSplash = project.hasProperty('host.osSplash') ? project.property('host.osSplash') : 'false'
+// The phone build (host.json android.formFactor, tools/pack.mjs --phone): its own manifest, no Meta Platform SDK.
+def hostPhone = project.hasProperty('host.formFactor') && project.property('host.formFactor') == 'phone'
+def hostOrientation = project.hasProperty('host.orientation') ? project.property('host.orientation') : 'landscape'
+// WebSocket + WebRTC data channels in the native library (host.json network.webrtc, WP-21).
+def hostWebrtc = project.hasProperty('host.webrtc') && project.property('host.webrtc') == 'true'
+
+android {
+    namespace 'gg.dmnshd.webxrhost'
+    compileSdk 34
+    ndkVersion '27.2.12479018'
+    defaultConfig {
+        applicationId hostPackage
+        minSdk 29
+        targetSdk 34
+        versionCode project.property('host.versionCode').toInteger()
+        versionName project.property('host.versionName')
+        manifestPlaceholders = [appName: hostAppName, osSplash: hostOsSplash, orientation: hostOrientation]
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared', '-DANDROID_PLATFORM=android-29', "-DHOST_PHONE=${hostPhone ? 'ON' : 'OFF'}", "-DHOST_WEBRTC=${hostWebrtc ? 'ON' : 'OFF'}"; cppFlags '' } }
+    }
+    externalNativeBuild { cmake { path file('../../host/CMakeLists.txt'); version '3.22.1+' } }
+    buildTypes {
+        release { minifyEnabled false; signingConfig signingConfigs.debug }
+        debug { debuggable true; jniDebuggable true }
+    }
+    packagingOptions { jniLibs { useLegacyPackaging false; pickFirsts += ['**/libc++_shared.so'] } }
+    androidResources { noCompress 'glb', 'ktx2', 'ogg', 'opus', 'webm', 'mp3', 'wasm', 'bin', 'js', 'json', 'png', 'ttf', 'txt' }
+    sourceSets { main { jniLibs.srcDirs += ['../../third_party/v8/lib', '../../third_party/openxr/lib']; if (!hostPhone && file('../../third_party/ovr_platform_sdk/Android/libs').exists()) jniLibs.srcDirs += ['../../third_party/ovr_platform_sdk/Android/libs']; if (hostPhone) { manifest.srcFile 'src/phone/AndroidManifest.xml'; res.srcDirs += ['src/phone/res'] } } }
+}

@@ -1,0 +1,15 @@
+diff --git a/build/config/apple/codesign.py b/build/config/apple/codesign.py
+index e14742445..2f93af354 100644
+--- a/build/config/apple/codesign.py
++++ b/build/config/apple/codesign.py
+@@ -146,8 +146,8 @@ class Bundle(object):
+ 
+     @staticmethod
+     def Kind(platform, extension):
+-        if platform in ('iphoneos', 'iphonesimulator'):
+-            return 'ios'
++        if platform in ('iphoneos', 'iphonesimulator', 'xros', 'xrsimulator'):
++            return 'ios'  # visionOS bundles share the flat iOS layout
+         if platform == 'macosx':
+             if extension == '.framework':
+                 return 'mac_framework'

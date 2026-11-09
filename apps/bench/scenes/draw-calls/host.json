@@ -1,0 +1,7 @@
+{
+  "app": { "name": "bench draw-calls", "package": "gg.dmnshd.webxrhost.bench.drawcalls" },
+  "mode": "js",
+  "web": { "dist": "../../dist/draw-calls", "origin": "https://bench.local", "query": "" },
+  "xr": { "autoEnter": true, "preferredRate": 72 },
+  "debug": { "inspector": true, "port": 9229 }
+}

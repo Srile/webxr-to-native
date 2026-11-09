@@ -1,0 +1,28 @@
+{
+  "name": "webxr-to-native",
+  "description": "Run an unmodified WebXR web game as a native app on Meta Quest, without a browser",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Srile/webxr-to-native.git" },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:runtime": "node runtime/build.mjs",
+    "test:runtime": "node --test runtime/test/*.test.js",
+    "quest": "node tools/pack.mjs --install --run",
+    "phone": "node tools/pack.mjs --phone --install --run",
+    "mac": "node tools/mac.mjs",
+    "mac:app": "node tools/mac.mjs --app",
+    "ios": "node tools/ios.mjs",
+    "win": "node tools/win.mjs",
+    "win:app": "node tools/win.mjs --app",
+    "linux": "node tools/linux.mjs",
+    "linux:app": "node tools/linux.mjs --app",
+    "linux:xr": "node tools/linux.mjs --xr"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "iwer": "2.8.0"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "app": { "name": "hello-xr", "package": "gg.dmnshd.webxrhost.helloxr" },
+  "mode": "native-clear",
+  "xr": { "arraySize": 2, "preferredRate": 90, "foveation": 0 }
+}

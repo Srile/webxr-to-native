@@ -1,0 +1,7 @@
+{
+  "app": { "name": "bench instanced", "package": "gg.dmnshd.webxrhost.bench.instanced" },
+  "mode": "js",
+  "web": { "dist": "../../dist/instanced", "origin": "https://bench.local", "query": "" },
+  "xr": { "autoEnter": true, "preferredRate": 72 },
+  "debug": { "inspector": true, "port": 9229 }
+}

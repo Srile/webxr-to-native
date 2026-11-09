@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" android:installLocation="auto">
+    <uses-feature android:glEsVersion="0x00030002" android:required="true"/>
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1"/>
+    <!-- Hands are an input the game supports: without this feature the shell refuses to launch while the controllers sleep (RequiresControllersLaunchInterceptor). -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
+    <!-- immersive-ar: passthrough under the eye buffer; the room's planes and meshes need the USE_SCENE runtime permission. -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false"/>
+    <uses-permission android:name="com.oculus.permission.USE_SCENE"/>
+    <uses-permission android:name="horizonos.permission.USE_SCENE"/>
+    <!-- The runtime only exposes the XR_FB_spatial_entity* / XR_FB_scene extensions to apps that declare the anchor API permission. -->
+    <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API"/>
+    <uses-permission android:name="horizonos.permission.USE_ANCHOR_API"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR"/>
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM"/>
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING"/>
+    <queries>
+        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"/>
+        <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService"/></intent>
+        <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService"/></intent>
+    </queries>
+    <application android:label="${appName}" android:icon="@mipmap/ic_launcher" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="true">
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s"/>
+        <meta-data android:name="com.oculus.vr.focusaware" android:value="true"/>
+        <meta-data android:name="com.oculus.handtracking.version" android:value="V2.0"/>
+        <meta-data android:name="com.oculus.intent.category.VR" android:value="vr_only"/>
+        <!-- OS splash: the shell shows assets/vr_splash.png instead of its generic loading void from launch until the app's first frame (host.json app.splash, tools/pack.mjs). -->
+        <meta-data android:name="com.oculus.ossplash" android:value="${osSplash}"/>
+        <activity android:name="android.app.NativeActivity" android:exported="true"
+            android:launchMode="singleTask" android:screenOrientation="landscape"
+            android:excludeFromRecents="false" android:resizeableActivity="false"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+            <meta-data android:name="android.app.lib_name" android:value="webxrhost"/>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="com.oculus.intent.category.VR"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

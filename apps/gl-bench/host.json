@@ -1,0 +1,7 @@
+{
+  "app": { "name": "gl-bench", "package": "gg.dmnshd.webxrhost.glbench" },
+  "mode": "js",
+  "web": { "origin": "https://app.local", "query": "" },
+  "xr": { "autoEnter": false },
+  "debug": { "inspector": false }
+}

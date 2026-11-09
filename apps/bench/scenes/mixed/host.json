@@ -1,0 +1,7 @@
+{
+  "app": { "name": "bench mixed", "package": "gg.dmnshd.webxrhost.bench.mixed" },
+  "mode": "js",
+  "web": { "dist": "../../dist/mixed", "origin": "https://bench.local", "query": "" },
+  "xr": { "autoEnter": true, "preferredRate": 72 },
+  "debug": { "inspector": true, "port": 9229 }
+}
