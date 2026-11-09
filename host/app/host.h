@@ -59,6 +59,7 @@ class Host {
   void xrEnd();
   void xrTick();
   void flatTick();
+  void updateVisibility();  // the Quest: the page hidden and its audio stopped while the headset is off (WP-07c)
   void stats(const XrFrameInfo* f);
 
   android_app* app_;  // the current activity; null between a phone's activities
@@ -87,6 +88,9 @@ class Host {
   double statT_ = 0; int frames_ = 0; double lastFlat_ = 0; double jsMs_ = 0, waitMs_ = 0, endMs_ = 0;
   XrSessionState lastState_ = XR_SESSION_STATE_UNKNOWN;
   bool scenePermissionAsked_ = false;
+  // The Quest's page visibility (updateVisibility): hidden_ once the immersive session has been seen VISIBLE/FOCUSED
+  // (xrSeenVisible_, per XR session) and left it, or while a flat app is paused.
+  bool hidden_ = false, xrSeenVisible_ = false;
   bool phone_ = false, shown_ = true; float dpr_ = 1; float insets_[4] = {0, 0, 0, 0}; int insetW_ = 0, insetH_ = 0, insetFrames_ = 0;
   // The phone's page rate (host.json android.frameRate) and its pacing: Choreographer's vsync callback (on this, the
   // looper thread) records each vsync and measures the period; a frame starts every n-th vsync, n the most that

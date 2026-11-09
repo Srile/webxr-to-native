@@ -9,6 +9,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include "xr/xr_input.h"
@@ -75,6 +76,9 @@ class OpenXrDevice {
 
   // Pump events; returns false when the session is gone for good (EXITING/LOSS_PENDING).
   bool pollEvents();
+  // Runs on the polling thread right before xrEndSession (STOPPING): the host drains the GL thread here, which may
+  // still be submitting the last frame (gl.pipeline), so xrEndFrame and xrEndSession never overlap.
+  std::function<void()> beforeSessionEnd;
   bool sessionRunning() const { return running_; }
   bool focused() const { return state_ == XR_SESSION_STATE_FOCUSED; }
   XrSessionState state() const { return state_; }

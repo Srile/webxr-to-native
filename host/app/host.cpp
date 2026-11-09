@@ -126,6 +126,9 @@ bool Host::startJs() {
     char v[PROP_VALUE_MAX] = {}; if (__system_property_get("debug.webxr.glpipeline", v) > 0 && (v[0] == '0' || v[0] == '1')) pipeline_ = v[0] == '1';
     g_pipeHost = this;
     glq::registerOp(kOpXrBegin, &Host::opXrBegin); glq::registerOp(kOpXrEnd, &Host::opXrEnd);
+    // The headset off (STOPPING): the session ends from the host thread while the GL thread may still be in the last
+    // frame's xrEndFrame (pipelined: queued, not waited for). OpenXR wants the two serialised, so drain first.
+    xr_.beforeSessionEnd = [] { glq::finish(); };
     HOST_LOGI("xr frames %s", pipeline_ ? "pipelined: the page records frame N+1 while the GL thread submits frame N" : "synchronous with the GL thread");
   }
   if (!Engine::initPlatform(std::move(snapshot), GcScheduler::v8Flags(gcCfg_))) return false;
@@ -198,7 +201,7 @@ bool Host::xrBegin(const Json& opts, Json& out) {
   return true;
 }
 
-void Host::xrEnd() { xrActive_ = false; glq::sync("destroySwapchain", [&] { xr_.destroySwapchain(); }); xr_.resetFoveation(); scenePermissionAsked_ = false; HOST_LOGI("xr end (swapchain dropped; session kept)"); }
+void Host::xrEnd() { xrActive_ = false; xrSeenVisible_ = false; glq::sync("destroySwapchain", [&] { xr_.destroySwapchain(); }); xr_.resetFoveation(); scenePermissionAsked_ = false; HOST_LOGI("xr end (swapchain dropped; session kept)"); }
 
 void Host::onWindow(ANativeWindow* win) {
   window_ = win; if (mode_ != "native-clear" && eglUp_) { glq::sync("bindWindow", [&] { egl_.bindWindow(win); }); }
@@ -483,6 +486,7 @@ void Host::flatTick() {
     stats(nullptr);
     return;
   }
+  if (hidden_) return;  // the Quest with the headset off: no frames, as a hidden tab gets none
   if (now - lastFlat_ >= 16.0) {
     lastFlat_ = now; double t0 = now;
     if (jsUp_) { glq::sync("makeCurrent", [&] { egl_.makeCurrentPreferred(); }); engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { nativeFlatFrame(iso, ctx, now); }); captureShots(nullptr); if (window_ && egl_.windowWidth() > 0) glq::sync("swap", [&] { egl_.swap(); }); }
@@ -491,10 +495,33 @@ void Host::flatTick() {
   }
 }
 
+// The Quest's page visibility, as a browser's: hidden while the headset is off. An immersive session counts as shown
+// while VISIBLE or FOCUSED (the system menu over it is FOCUSED → VISIBLE, visible-blurred: still shown), and only
+// once it has been: a session starts in SYNCHRONIZED until the first frames are submitted, which must not flash
+// the page hidden. Without a session (a flat app on Quest) Android's resumed state decides. Hidden: the document's
+// visibilitychange fires, the audio output stops (the graph keeps its state and resumes where it was), the flat
+// frames stop and the loop idles; the XR session's own visibilitychange comes from its state events (xrTick). The
+// phone build does the same from its window and lifecycle (flatTick); the Vision Pro host from its scene phase.
+void Host::updateVisibility() {
+  bool shown = resumed_;
+  if (xrInstance_ && xrActive_) {
+    const XrSessionState st = xr_.state();
+    const bool visible = xr_.sessionRunning() && (st == XR_SESSION_STATE_VISIBLE || st == XR_SESSION_STATE_FOCUSED);
+    if (visible) xrSeenVisible_ = true;
+    shown = visible || !xrSeenVisible_;
+  }
+  if (shown == !hidden_) return;
+  hidden_ = !shown;
+  engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { dom::setHidden(iso, ctx, hidden_); });
+  if (hidden_) audio::RealtimeContext::pauseOutput(); else audio::RealtimeContext::resumeOutput();
+  HOST_LOGI("page %s (session %s): audio output %s", hidden_ ? "hidden" : "shown", xrActive_ ? "active" : "none", hidden_ ? "paused" : "resumed");
+}
+
 bool Host::tick() {
   if (exit_) return false;
   if (xrInstance_) { if (!xr_.pollEvents()) { HOST_LOGI("xr session over"); return false; } }
   const bool xrRendering = xrInstance_ && xrActive_ && xr_.sessionRunning();
+  if (!phone_ && jsUp_) updateVisibility();
   if (xrRendering) xrTick();
   else flatTick();
   if (jsUp_) { engine_.pump(); audioTick(svc_); platformTick(svc_); store_.tick(loop_.now()); }
@@ -509,6 +536,7 @@ bool Host::tick() {
   // or, hidden, up to 50 ms (timers still run, as a background browser tab's do).
   if (!xrRendering) {
     double most = 4.0;
+    if (!phone_ && hidden_) most = 50.0;  // the headset off: timers still run, nothing is drawn
     if (phone_ && jsUp_) {
       if (!shown_) most = 50.0;
       else if (vsyncNs_ && vsyncPeriodNs_) { timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); const int64_t nowNs = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; most = std::clamp((double)(vsyncNs_ + vsyncPeriodNs_ - nowNs) / 1e6, 0.0, 4.0); }

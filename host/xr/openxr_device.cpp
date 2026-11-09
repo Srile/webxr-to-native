@@ -340,7 +340,7 @@ bool OpenXrDevice::beginSession() {
   else { HOST_LOGI("perf: start %s, adaptive %d (window %d frames, miss ratio %.2f, %d stable windows)", perfLevelName(perfCfg_.startLevel), perfCfg_.adaptive, perfCfg_.window, perfCfg_.missRatio, perfCfg_.stableWindows); perfLevel_[0] = perfLevel_[1] = -1; applyPerfLevels(); }
   return true;
 }
-bool OpenXrDevice::endSession() { XR_CHECK(xrEndSession(session_), "xrEndSession"); running_ = false; HOST_LOGI("session ended"); return true; }
+bool OpenXrDevice::endSession() { if (beforeSessionEnd) beforeSessionEnd(); XR_CHECK(xrEndSession(session_), "xrEndSession"); running_ = false; HOST_LOGI("session ended"); return true; }
 void OpenXrDevice::requestExit() { if (session_ && running_) xrRequestExitSession(session_); exitRequested_ = true; }
 
 bool OpenXrDevice::pollEvents() {

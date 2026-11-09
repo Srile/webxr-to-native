@@ -18,10 +18,13 @@
 namespace host {
 namespace audio {
 
-namespace { std::vector<RealtimeContext*> g_live; }  // open contexts (host thread only): resumeAfterInterruption
+namespace {
+std::vector<RealtimeContext*> g_live;  // open contexts (host thread only): resumeAfterInterruption
+bool g_outputPaused = false;           // pauseOutput until resumeOutput: a context made meanwhile starts paused too
+}
 
 RealtimeContext::RealtimeContext(double rate, uint32_t chunkSize)
-    : ContextBase(rate, 2, chunkSize, 1u << 13, true), cmds_(1u << 14) { g_live.push_back(this); }
+    : ContextBase(rate, 2, chunkSize, 1u << 13, true), cmds_(1u << 14) { paused_.store(g_outputPaused); g_live.push_back(this); }
 
 void RealtimeContext::resumeAfterInterruption() {
 #ifdef __APPLE__
@@ -29,12 +32,13 @@ void RealtimeContext::resumeAfterInterruption() {
 #endif
 }
 void RealtimeContext::pauseOutput() {
+  g_outputPaused = true;
 #ifdef __APPLE__
   for (RealtimeContext* c : g_live) { c->paused_.store(true); if (c->unit_ && c->running_.load()) AudioOutputUnitStop((AudioComponentInstance)c->unit_); }  // Stop returns once the callback is out
 #elif defined(__linux__) && !defined(__ANDROID__)
   for (RealtimeContext* c : g_live) { c->paused_.store(true); if (c->paStream_ && c->running_.load()) c->corkPulse(true); }  // corkPulse holds the mainloop lock: the callback is out
 #elif defined(__ANDROID__)
-  // The phone build in the background (app/host.cpp). Oboe's pause is asynchronous: the callback can still be in the
+  // The page hidden (app/host.cpp: the phone in the background, the Quest with the headset off). Oboe's pause is asynchronous: the callback can still be in the
   // graph for one more buffer while this thread starts applying commands directly (issue()). So: paused first (a
   // callback that starts now sees it and writes silence), then wait out one already inside, then pause the stream.
   for (RealtimeContext* c : g_live) {
@@ -45,6 +49,7 @@ void RealtimeContext::pauseOutput() {
 #endif
 }
 void RealtimeContext::resumeOutput() {
+  g_outputPaused = false;
 #ifdef __APPLE__
   for (RealtimeContext* c : g_live) { c->paused_.store(false); if (c->unit_ && c->running_.load()) AudioOutputUnitStart((AudioComponentInstance)c->unit_); }
 #elif defined(__linux__) && !defined(__ANDROID__)
