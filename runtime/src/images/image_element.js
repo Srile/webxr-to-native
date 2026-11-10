@@ -2,16 +2,25 @@
 // routing as the game's own fetches), decodes through __native.img, then
 // fires 'load' (onload AND addEventListener('load')) or 'error'.
 import { decodeBytes, decodeDataUrl, domError } from './pixels.js'
+const SW_HOOK = Symbol.for('webxr-host.serviceworker')  // set by runtime/src/serviceworker (host.json web.serviceWorker)
 
+function elementStyle(g) {
+  if (typeof g.CSSStyleDeclaration === 'function') return new g.CSSStyleDeclaration()
+  const s = {}
+  s.setProperty = (k, v) => { s[k] = String(v ?? '') }
+  s.removeProperty = (k) => { const v = s[k] ?? ''; delete s[k]; return String(v) }
+  s.getPropertyValue = (k) => s[k] ?? ''
+  return s
+}
 export function makeImageElement(g, { EventTargetBase, makeEvent }) {
   function loadBytes(url) {
     if (/^data:/i.test(url)) {
       const d = decodeDataUrl(url)
       return d ? Promise.resolve(d.bytes) : Promise.reject(new TypeError('Image: malformed data: URL'))
     }
-    const fetch = g.fetch
+    const fetch = g.fetch, sw = g[SW_HOOK]  // a controlling service worker sees the load as an image request (WP-27)
     if (typeof fetch !== 'function') return Promise.reject(new Error('Image: fetch is not available'))
-    return Promise.resolve(fetch(url)).then(res => {
+    return Promise.resolve(sw ? sw.load(url, 'image') : fetch(url)).then(res => {
       if (!res || (res.ok === false) || (typeof res.status === 'number' && (res.status < 200 || res.status >= 300))) throw new Error(`Image: HTTP ${res && res.status} for ${url}`)
       return res.arrayBuffer()
     }).then(buf => buf instanceof Uint8Array ? buf : new Uint8Array(buf))
@@ -46,9 +55,15 @@ export function makeImageElement(g, { EventTargetBase, makeEvent }) {
       this.loading = 'eager'
       this.fetchPriority = 'auto'
       this.alt = ''
-      this.style = {}
+      this.style = elementStyle(g)
       this.parentNode = null
       this.__attrs = new Map()
+      this._attrs = this.__attrs
+      this.childNodes = []
+      this.namespaceURI = 'http://www.w3.org/1999/xhtml'
+      // Own fields, ahead of Element's accessors once this object is an HTMLElement.
+      Object.defineProperty(this, 'id', { value: '', writable: true, configurable: true, enumerable: true })
+      Object.defineProperty(this, 'className', { value: '', writable: true, configurable: true, enumerable: true })
     }
 
     get tagName() { return 'IMG' }
@@ -148,6 +163,11 @@ export function makeImageElement(g, { EventTargetBase, makeEvent }) {
   // new Image(w, h) is an HTMLImageElement; the two share one prototype like the DOM's.
   function Image(width, height) { return new HTMLImageElement(width, height) }
   Image.prototype = HTMLImageElement.prototype
+
+  // A browser image is an HTMLElement. lazy-widgets classifies an icon with `media instanceof Element`
+  // and tagName IMG; anything else falls through to `instanceof VideoFrame`, which throws where that
+  // constructor does not exist.
+  if (typeof g.HTMLElement === 'function') Object.setPrototypeOf(HTMLImageElement.prototype, g.HTMLElement.prototype)
 
   return { HTMLImageElement, Image }
 }

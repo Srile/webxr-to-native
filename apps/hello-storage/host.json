@@ -1,0 +1,23 @@
+{
+  "app": {
+    "name": "hello-storage",
+    "package": "gg.dmnshd.webxrhost.hellostorage"
+  },
+  "mode": "js",
+  "web": {
+    "origin": "https://app.local",
+    "query": ""
+  },
+  "storage": {
+    "indexedDB": true,
+    "cache": true,
+    "quotaMB": 6
+  },
+  "xr": {
+    "autoEnter": false
+  },
+  "debug": {
+    "inspector": true,
+    "port": 9233
+  }
+}

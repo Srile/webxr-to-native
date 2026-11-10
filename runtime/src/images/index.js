@@ -1,5 +1,6 @@
 // images: ImageBitmap / createImageBitmap, ImageData, Image / HTMLImageElement,
-// HTMLCanvasElement / OffscreenCanvas with the Canvas 2D subset. install(g)
+// HTMLCanvasElement / OffscreenCanvas with the Canvas 2D subset, FontFace and
+// document.fonts for its text (fonts.js). install(g)
 // runs once at boot with g = globalThis (a test passes its own object).
 //
 // The pixel-source convention shared with the WebGL binding (WP-04): every
@@ -14,6 +15,7 @@
 // dom-lite's document.createElement('canvas') / ('img') call the factories
 // this module defines: g.__hostCreateCanvas() and g.__hostCreateImage().
 import { makeCanvas } from './canvas2d.js'
+import { makeFonts } from './fonts.js'
 import { makeImageBitmap } from './image_bitmap.js'
 import { makeImageData } from './image_data.js'
 import { makeImageElement } from './image_element.js'
@@ -92,17 +94,23 @@ export function install(g) {
   const ImageData = makeImageData(g)
   const { ImageBitmap, createImageBitmap, newBitmap } = makeImageBitmap(g)
   const { HTMLImageElement, Image } = makeImageElement(g, { EventTargetBase, makeEvent })
-  const { HTMLCanvasElement, OffscreenCanvas, CanvasRenderingContext2D } = makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitmap, warnOnce, defer })
+  const fonts = makeFonts(g, { EventTargetBase })
+  const { HTMLCanvasElement, OffscreenCanvas, CanvasRenderingContext2D, Path2D } = makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitmap, warnOnce, defer, fonts })
 
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false })
   define('ImageData', ImageData)
   define('ImageBitmap', ImageBitmap)
   define('createImageBitmap', createImageBitmap)
+  if (typeof g.VideoFrame !== 'function') define('VideoFrame', class VideoFrame {})  // WebCodecs; instanceof must not throw
   define('HTMLImageElement', HTMLImageElement)
   define('Image', Image)
   define('HTMLCanvasElement', HTMLCanvasElement)
   define('OffscreenCanvas', OffscreenCanvas)
   define('CanvasRenderingContext2D', CanvasRenderingContext2D)
+  define('Path2D', Path2D)
+  define('FontFace', fonts.FontFace)
+  define('FontFaceSet', fonts.FontFaceSet)
+  if (g.document && typeof g.document === 'object') Object.defineProperty(g.document, 'fonts', { value: fonts.fontSet, writable: true, configurable: true, enumerable: true })
   define('OffscreenCanvasRenderingContext2D', CanvasRenderingContext2D)
   define('__hostCreateCanvas', () => new HTMLCanvasElement())
   define('__hostCreateImage', () => new HTMLImageElement())

@@ -58,6 +58,7 @@ class Host {
   bool xrBegin(const Json& opts, Json& out);
   void xrEnd();
   void xrTick();
+  void publishXrState();  // session-state changes reach JS while still flat; xrTick cannot, it starts only after the page's swapchain
   void flatTick();
   void updateVisibility();  // the Quest: the page hidden and its audio stopped while the headset is off (WP-07c)
   void stats(const XrFrameInfo* f);

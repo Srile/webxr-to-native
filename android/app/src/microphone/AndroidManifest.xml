@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Microphone capture (WP-25): merged into the Quest's (src/main) or the phone's (src/phone) manifest only for a game
+     whose host.json says media.microphone (android/app/build.gradle, Gradle property host.microphone). RECORD_AUDIO is
+     a runtime permission: the host asks for it when the page first calls getUserMedia, not at launch. The feature is
+     optional, so no store filters out a device without a microphone. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+</manifest>

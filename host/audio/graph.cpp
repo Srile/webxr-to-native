@@ -2,6 +2,7 @@
 // AudioParam automation (§1.6), BiquadFilterNode coefficients (§1.9),
 // PannerNode equalpower + distance models (§1.27, §6), channel mixing (§4).
 #include "audio/graph.h"
+#include "audio/analyser.h"
 #include <algorithm>
 #include <cstdlib>
 
@@ -51,6 +52,8 @@ Kind kindFromString(const char* s) {
   if (!strcmp(s, "panner")) return Kind::Panner;
   if (!strcmp(s, "destination")) return Kind::Destination;
   if (!strcmp(s, "listener")) return Kind::Listener;
+  if (!strcmp(s, "analyser")) return Kind::Analyser;
+  if (!strcmp(s, "mediaStream")) return Kind::MediaStream;
   return Kind::None;
 }
 int paramIndex(Kind k, const char* name) {
@@ -201,7 +204,7 @@ Graph::Graph(double sampleRate, int outChannels, uint32_t chunkSize, uint32_t ms
 }
 Graph::~Graph() {
   for (uint32_t c = 0; c < nodeChunkCount_; c++) {
-    for (uint32_t i = 0; i < chunkSize_; i++) if (nodeChunks_[c][i].buffer) nodeChunks_[c][i].buffer->unref();
+    for (uint32_t i = 0; i < chunkSize_; i++) { Node& n = nodeChunks_[c][i]; if (n.buffer) n.buffer->unref(); if (n.ext) n.ext->unref(); }
     delete[] nodeChunks_[c];
   }
   for (uint32_t c = 0; c < edgeChunkCount_; c++) delete[] edgeChunks_[c];
@@ -264,6 +267,7 @@ void Graph::apply(const Command& c) {
     case Op::Start: start(c.a, c.t, c.v, c.v2); break;
     case Op::Stop: stop(c.a, c.t); break;
     case Op::SetBuffer: setBuffer(c.a, (AudioBufferData*)c.ptr); break;
+    case Op::SetExt: setExt(c.a, (Shared*)c.ptr); break;
   }
 }
 
@@ -271,6 +275,8 @@ void Graph::createNode(uint32_t slot, Kind kind) {
   Node* n = node(slot); if (!n) return;
   if (n->used) freeNode(slot);
   if (n->buffer) { n->buffer->unref(); n->buffer = nullptr; }
+  if (n->ext) { post(Msg{Msg::ReleaseExt, slot, n->ext}); n->ext = nullptr; }
+  n->cursor = LiveCursor{};
   // Reset everything but the (trivially re-zeroed) buffers.
   n->kind = kind; n->used = true; n->releasedByJs = false; n->visiting = false; n->stamp = 0;
   n->inHead = n->outHead = NONE; n->outCh = 0;
@@ -309,7 +315,7 @@ bool Graph::connect(uint32_t from, uint32_t to) { return connectParam(from, to, 
 bool Graph::connectParam(uint32_t from, uint32_t to, int param) {
   Node* a = node(from); Node* b = node(to);
   if (!a || !b || !a->used || !b->used || a->kind == Kind::Destination) return false;
-  if (param < 0 && b->isSource()) return false;
+  if (param < 0 && (b->isSource() || b->kind == Kind::MediaStream)) return false;
   for (uint32_t ei = a->outHead; ei != NONE; ei = edge(ei)->nextOut) { Edge* e = edge(ei); if (e->to == to && e->param == param) return true; }
   uint32_t ei = allocEdge(); if (ei == NONE) return false;
   Edge* e = edge(ei); e->from = from; e->to = to; e->param = (int16_t)param;
@@ -379,12 +385,19 @@ void Graph::setBuffer(uint32_t slot, AudioBufferData* buf) {
   if (n->buffer) post(Msg{Msg::ReleaseBuffer, slot, n->buffer});
   n->buffer = buf;
 }
+void Graph::setExt(uint32_t slot, Shared* s) {
+  Node* n = node(slot);
+  if (!n || !n->used || (s && s->kind != n->kind)) { if (s) post(Msg{Msg::ReleaseExt, slot, s}); return; }
+  if (n->ext) post(Msg{Msg::ReleaseExt, slot, n->ext});
+  n->ext = s; n->cursor = LiveCursor{};
+}
 
 // ---- Graph: lifetime -----------------------------------------------------------------
 
 void Graph::maybeFree(uint32_t slot) {
   Node* n = node(slot); if (!n || !n->used || !n->releasedByJs || n->kind == Kind::Destination) return;
   if (n->isSource()) { if (n->started && !n->ended) return; }
+  else if (n->kind == Kind::MediaStream) { if (n->ext && static_cast<LiveInput*>(n->ext)->live()) return; }  // render() frees it once the track ends
   else if (n->inHead != NONE) return;
   freeNode(slot);
 }
@@ -394,6 +407,7 @@ void Graph::freeNode(uint32_t slot) {
   while (n->inHead != NONE) unlinkEdge(n->inHead);
   while (n->outHead != NONE) { uint32_t to = edge(n->outHead)->to; unlinkEdge(n->outHead); maybeFree(to); }
   if (n->buffer) { post(Msg{Msg::ReleaseBuffer, slot, n->buffer}); n->buffer = nullptr; }
+  if (n->ext) { post(Msg{Msg::ReleaseExt, slot, n->ext}); n->ext = nullptr; }
   post(Msg{Msg::Freed, slot, nullptr});
 }
 // A source that ends mid-quantum keeps its edges until the quantum is summed
@@ -443,9 +457,12 @@ void Graph::render() {
   for (int p = 0; p < LISTENER_PARAMS; p++) listener_[p].prune(t0);
   Node* dest = node(0);
   if (dest && dest->used) pull(*dest);
+  // Sources advance, and analysers record, even when nothing downstream pulls them (an analyser metering a
+  // microphone is connected to nothing, as in a browser). A capture node the page let go of goes with its track.
   for (uint32_t c = 0; c < nodeChunkCount_; c++) for (uint32_t i = 0; i < chunkSize_; i++) {
     Node& n = nodeChunks_[c][i];
-    if (n.used && n.isSource() && n.stamp != stamp_) pull(n);
+    if (n.used && (n.isSource() || n.kind == Kind::Analyser) && n.stamp != stamp_) pull(n);
+    if (n.used && n.kind == Kind::MediaStream && n.releasedByJs && !(n.ext && static_cast<LiveInput*>(n.ext)->live())) freeNode(c * chunkSize_ + i);
   }
   detachFinished();
   frames_.fetch_add(QUANTUM, std::memory_order_release);
@@ -481,6 +498,8 @@ void Graph::process(Node& n, int inCh) {
     case Kind::Biquad: processBiquad(n, inCh); break;
     case Kind::Compressor: processCompressor(n, inCh); break;
     case Kind::Panner: processPanner(n, inCh); break;
+    case Kind::Analyser: processAnalyser(n, inCh); break;
+    case Kind::MediaStream: processMediaStream(n); break;
     default: n.outCh = 0; break;
   }
 }
@@ -718,6 +737,28 @@ void Graph::processPanner(Node& n, int inCh) {
   } else {
     for (int i = 0; i < QUANTUM; i++) { float l = n.in[0][i] * dg, r = n.in[1][i] * dg; n.out[0][i] = l * gl; n.out[1][i] = r + l * gr; }
   }
+}
+
+// AnalyserNode: its input passes through unchanged; the input down-mixed to mono (silence when nothing is
+// connected) goes into the history the host thread analyses (analyser.cpp). Writes only; no allocation.
+void Graph::processAnalyser(Node& n, int inCh) {
+  n.outCh = inCh;
+  if (inCh > 0) memcpy(n.out, n.in, sizeof(float) * QUANTUM * (size_t)inCh);
+  auto* a = static_cast<AnalyserState*>(n.ext);
+  if (!a) return;
+  if (inCh == 0) { a->pushSilence(QUANTUM); return; }
+  if (inCh == 1) { a->push(n.in[0], QUANTUM); return; }
+  float* mono = scratch_[0];  // free here: an analyser has no AudioParams
+  for (int i = 0; i < QUANTUM; i++) mono[i] = 0.5f * (n.in[0][i] + n.in[1][i]);
+  a->push(mono, QUANTUM);
+}
+
+// MediaStreamAudioSourceNode: one quantum of its track, mono, resampled to the context's rate by the capture
+// (media/mic.cpp); silence (outCh 0) when the track is disabled or ended, before the first samples, on an underrun.
+void Graph::processMediaStream(Node& n) {
+  n.outCh = 0;
+  auto* in = static_cast<LiveInput*>(n.ext);
+  if (in && in->read(n.cursor, n.out[0], QUANTUM, rate_)) n.outCh = 1;
 }
 
 }  // namespace audio

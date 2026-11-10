@@ -32,3 +32,36 @@ export function webrtcSwitch(cfg, build) {
   const was = existsSync(cache) ? (/HOST_WEBRTC:BOOL=(\w+)/.exec(readFileSync(cache, 'utf8'))?.[1] ?? 'OFF') : null
   return { define: `-DHOST_WEBRTC=${flag}`, stale: was !== null && was !== flag }
 }
+// host.json media.microphone (WP-25): the microphone's CMake switch for a window host's build directory, as webrtcSwitch.
+export function microphoneSwitch(cfg, build) {
+  const flag = cfg.media?.microphone === true ? 'ON' : 'OFF', cache = join(build, 'CMakeCache.txt')
+  const was = existsSync(cache) ? (/HOST_MICROPHONE:BOOL=(\w+)/.exec(readFileSync(cache, 'utf8'))?.[1] ?? 'OFF') : null
+  return { define: `-DHOST_MICROPHONE=${flag}`, stale: was !== null && was !== flag, on: flag === 'ON' }
+}
+
+// host.json js.intl (WP-24): the Android build links V8 with ICU (third_party/v8-intl) instead of the stock V8, which
+// has no Intl. It comes from tools/setup-v8-android-intl.sh (the published build, or --build from source), run on
+// first need; a failure there ends the build with its message. The window hosts' V8s (Homebrew on mac and Linux,
+// NuGet on Windows, the Apple builds) always carry ICU: they have nothing to switch.
+export function ensureV8Intl(cfg) {
+  const on = cfg.js?.intl === true
+  if (on && !existsSync(join(root, 'third_party/v8-intl/lib/libv8_monolith.a'))) {
+    try { execFileSync('bash', [join(root, 'tools/setup-v8-android-intl.sh')], { stdio: 'inherit' }) }
+    catch { console.error('js.intl: no third_party/v8-intl (V8 with ICU for Android): run tools/setup-v8-android-intl.sh, or with --build to build it from source'); process.exit(2) }
+  }
+  return on
+}
+// host.json storage.indexedDB / storage.cache (WP-26): either one builds the SQLite store into the host (HOST_STORAGE);
+// its sources come on first need (tools/setup-storage.sh).
+export const wantsStorage = (cfg) => cfg.storage?.indexedDB === true || cfg.storage?.cache === true
+export function ensureStorageSources(cfg) {
+  if (wantsStorage(cfg) && !existsSync(join(root, 'third_party/sqlite/.stamp-3540100')))
+    execFileSync('bash', [join(root, 'tools/setup-storage.sh')], { stdio: 'inherit' })
+}
+// As webrtcSwitch: the -D define for a window host's build directory, and whether that directory must be configured again.
+export function storageSwitch(cfg, build) {
+  ensureStorageSources(cfg)
+  const flag = wantsStorage(cfg) ? 'ON' : 'OFF', cache = join(build, 'CMakeCache.txt')
+  const was = existsSync(cache) ? (/HOST_STORAGE:BOOL=(\w+)/.exec(readFileSync(cache, 'utf8'))?.[1] ?? 'OFF') : null
+  return { define: `-DHOST_STORAGE=${flag}`, stale: was !== null && was !== flag }
+}

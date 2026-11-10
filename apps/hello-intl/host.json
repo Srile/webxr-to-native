@@ -1,0 +1,21 @@
+{
+  "app": {
+    "name": "hello-intl",
+    "package": "gg.dmnshd.webxrhost.hellointl"
+  },
+  "mode": "js",
+  "web": {
+    "origin": "https://app.local",
+    "query": ""
+  },
+  "js": {
+    "intl": true
+  },
+  "xr": {
+    "autoEnter": false
+  },
+  "debug": {
+    "inspector": true,
+    "port": 9231
+  }
+}

@@ -21,6 +21,7 @@ test('__hostCreateCanvas makes a 300x150 HTMLCanvasElement whose size setters re
   c.width = 'NaN'; assert.equal(c.width, 300)
   c.setAttribute('data-engine', 'three.js r181'); assert.equal(c.getAttribute('data-engine'), 'three.js r181')
   c.style.display = 'block'; c.classList.add('x'); assert.ok(c.classList.contains('x'))
+  assert.equal(c.style.removeProperty('display'), 'block'); assert.ok(!c.style.display)
   let fired = 0; c.addEventListener('webglcontextlost', () => fired++); c.dispatchEvent(g.Event ? new g.Event('webglcontextlost') : { type: 'webglcontextlost' }); assert.equal(fired, 1)
   assert.equal(c.getContext('bitmaprenderer'), null)
 })
@@ -350,6 +351,88 @@ test('a secondary WebGL canvas reads back bottom-up: drawImage, toDataURL and cr
   rb.fill(7)   // the context reuses its buffer before the promise settles
   const bmp = await bmpP
   assert.deepEqual(px(bmp.__rgba, 2, 0, 0), [0, 0, 255, 255]); assert.deepEqual(px(bmp.__rgba, 2, 1, 1), [255, 0, 0, 255])
+})
+
+test('canvas 2d: Path2D from SVG path data fills and strokes', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(4, 4)
+  const ctx = c.getContext('2d')
+  const box = new g.Path2D('M 0 0 L 4 0 L 4 4 L 0 4 Z')
+  ctx.fillStyle = '#ff0000'
+  ctx.fill(box)
+  assert.deepEqual(px(c.__rgba, 4, 1, 1), [255, 0, 0, 255])
+  const hole = new g.Path2D('M 0 0 L 4 0 L 4 4 L 0 4 Z M 1 1 L 1 3 L 3 3 L 3 1 Z')
+  c.width = 4
+  ctx.fillStyle = '#00ff00'
+  ctx.fill(hole, 'evenodd')
+  assert.deepEqual(px(c.__rgba, 4, 0, 0), [0, 255, 0, 255])
+  assert.deepEqual(px(c.__rgba, 4, 2, 2), [0, 0, 0, 0])
+  const curve = new g.Path2D('M 0 2 C 0 0 4 0 4 2 L 4 4 L 0 4 Z')
+  c.width = 4
+  ctx.fillStyle = '#0000ff'
+  ctx.fill(curve)
+  assert.equal(px(c.__rgba, 4, 2, 3)[2], 255)
+})
+
+test('an HTMLCanvasElement is an HTMLElement; an OffscreenCanvas is not', () => {
+  class EventTarget { constructor() {} addEventListener() {} removeEventListener() {} dispatchEvent() { return true } }
+  class HTMLElement extends EventTarget { constructor(tag) { super(); this.tabIndex = 7; this._tag = tag } }
+  const g = freshGlobal({ EventTarget, Event: class { constructor(type) { this.type = type } }, HTMLElement })
+  const c = g.__hostCreateCanvas()
+  assert.ok(c instanceof g.HTMLElement)
+  assert.ok(c instanceof g.HTMLCanvasElement)
+  assert.equal(c.tabIndex, -1)
+  assert.equal(new g.OffscreenCanvas(2, 2) instanceof g.HTMLElement, false)
+  const ctx = c.getContext('2d')
+  ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, 1, 1)
+  assert.equal(c.__rgba[0], 255)
+})
+
+test('clip keeps a clearRect inside the dirty region; restore drops it', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(8, 8), ctx = c.getContext('2d')
+  ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, 8, 8)
+  ctx.save()
+  ctx.beginPath(); ctx.rect(1, 1, 2, 2); ctx.rect(5, 5, 2, 2); ctx.clip()
+  ctx.clearRect(0, 0, 8, 8)   // the whole canvas, but only the two clipped rects go
+  assert.deepEqual(px(c.__rgba, 8, 0, 0), [255, 0, 0, 255])
+  assert.deepEqual(px(c.__rgba, 8, 1, 1), [0, 0, 0, 0])
+  assert.deepEqual(px(c.__rgba, 8, 3, 3), [255, 0, 0, 255])
+  assert.deepEqual(px(c.__rgba, 8, 6, 6), [0, 0, 0, 0])
+  ctx.restore()
+  ctx.clearRect(0, 0, 1, 1)
+  assert.deepEqual(px(c.__rgba, 8, 0, 0), [0, 0, 0, 0], 'restore brought back the unclipped canvas')
+})
+
+test('a curved clip keeps the corner outside it', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(20, 20), ctx = c.getContext('2d')
+  ctx.fillStyle = '#00ff00'; ctx.fillRect(0, 0, 20, 20)
+  ctx.beginPath()
+  ctx.moveTo(8, 0); ctx.lineTo(20, 0); ctx.lineTo(20, 20); ctx.lineTo(0, 20); ctx.lineTo(0, 8)
+  ctx.quadraticCurveTo(0, 0, 8, 0)
+  ctx.clip()
+  ctx.fillStyle = '#0000ff'; ctx.fillRect(0, 0, 20, 20)
+  assert.deepEqual(px(c.__rgba, 20, 0, 0), [0, 255, 0, 255])
+  assert.deepEqual(px(c.__rgba, 20, 10, 10), [0, 0, 255, 255])
+})
+
+test('destination-out fades to transparent and copy replaces with the source, transparency included', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(8, 4), ctx = c.getContext('2d')
+  ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, 8, 4)
+  const grad = ctx.createLinearGradient(0, 0, 8, 0)
+  grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = grad; ctx.fillRect(0, 0, 8, 4)
+  const left = px(c.__rgba, 8, 0, 1), right = px(c.__rgba, 8, 7, 1)
+  assert.ok(left[3] < 40, 'the opaque end of the mask punches the pixel out')
+  assert.equal(left[1], 0, 'what remains is the red underneath, not the white mask')
+  assert.ok(right[3] > 200 && right[0] === 255 && right[1] === 0)
+  const blank = new g.OffscreenCanvas(2, 2)
+  ctx.globalCompositeOperation = 'copy'
+  ctx.drawImage(blank, 4, 0)
+  assert.deepEqual(px(c.__rgba, 8, 4, 0), [0, 0, 0, 0], 'copy of a transparent image clears, where source-over would leave the old pixel')
+  assert.equal(px(c.__rgba, 8, 7, 1)[0], 255)
 })
 
 test('canvas 2d: stroke draws a line of lineWidth, round caps, the stroke colour', async () => {

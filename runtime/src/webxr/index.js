@@ -58,11 +58,19 @@ export function install(g) {
   let sceneGen = -1
   let webglLayerSrgb = false   // true while an XRWebGLLayer constructs: its swapchain is asked for sRGB
   let platformEnded = false    // the person left (vision: the immersive space closed): no automatic re-entry
+  let pendingPresent = null    // a requestSession held until the runtime's session has begun (headsetReady)
   let captureWaiters = null
   let depthNear = NaN, depthFar = NaN
   const scene = nx ? new SceneSource(nx, log) : null
 
   const wrapTexture = (name) => typeof g.__hostWrapTexture === 'function' ? g.__hostWrapTexture(name) : { __name: name }
+  // The runtime's session state as native reports it; null where there is none (a test's fake without it).
+  const nativeState = () => { try { return nx && typeof nx.state === 'function' ? nx.state() : null } catch (e) { return null } }
+  // The runtime's session has begun (READY: xrBeginSession done) or is already showing. Before that no frame comes
+  // (xrWaitFrame does not run while IDLE: the headset off at launch), and a page given a session then switches onto
+  // XR rAF and freezes. The host publishes the state change while the page is still flat (app/host.cpp
+  // publishXrState), so a held request opens on that event. No state(): ready.
+  const headsetReady = () => { const st = nativeState(); return !st || !!(st.running || st.visible || st.focused) }
   const captureDone = () => {
     const w = captureWaiters
     captureWaiters = null
@@ -173,7 +181,8 @@ export function install(g) {
       webglLayerSrgb = srgb
       try { super(session, gl, { ...init, depth: false, stencil: false }) } finally { webglLayerSrgb = false }
       const st = this[P_WEBGL_LAYER]
-      if (st.host && swap) st.host = new HostLayerTarget(gl, st.host.framebuffer, swap, init, srgb, config().invalidate !== false, wrapTexture)
+      if (st.host && swap) st.host = new HostLayerTarget(gl, st.host.framebuffer, swap, init, srgb, config().invalidate !== false, wrapTexture, config().clearFrame === true)
+
     }
   }
 
@@ -242,7 +251,7 @@ export function install(g) {
     if (mode !== 'immersive-vr' && mode !== 'immersive-ar') return Promise.reject(new DOMException('"' + mode + '" sessions are not supported', 'NotSupportedError'))
     if (!supported()) return Promise.reject(new DOMException('No XR device is available', 'NotSupportedError'))
     if (!modeOk(mode)) return Promise.reject(new DOMException('"' + mode + '" sessions are not supported on this device', 'NotSupportedError'))
-    if (active !== null) return Promise.reject(new DOMException('An immersive session is already active', 'InvalidStateError'))
+    if (active !== null || pendingPresent !== null) return Promise.reject(new DOMException('An immersive session is already active', 'InvalidStateError'))
     const allowed = featuresFor(mode)
     const required = (init && init.requiredFeatures) || []
     for (let i = 0; i < required.length; i++) {
@@ -254,12 +263,20 @@ export function install(g) {
       if (allowed.has(asked[i])) optional.push(asked[i])
       else log(1, 'xr: optional feature "' + asked[i] + '" is not supported and was dropped')
     }
-    return iwerRequest(mode, { ...init, requiredFeatures: required.slice(), optionalFeatures: optional }).then(started)
+    const open = () => iwerRequest(mode, { ...init, requiredFeatures: required.slice(), optionalFeatures: optional }).then(started)
+    if (headsetReady()) return open()
+    return new Promise((resolve, reject) => { pendingPresent = { open, resolve, reject } })
   })
 
   function started(session) {
     active = session
     depthNear = NaN; depthFar = NaN
+    // Opened while the runtime's session is READY or SYNCHRONIZED, the session starts hidden: those frames carry no
+    // valid views, and a page that places its scene from the first frame it is given (a game's menu) keeps that
+    // garbage for good. The READY state change was published before this session existed, so the state now stands
+    // in for it; the VISIBLE / FOCUSED change brings the visibilitychange to 'visible' as it always did.
+    const st = nativeState()
+    if (st && !st.visible) device.dispatchHostEvent({ type: 'visibilitychange', visible: false, focused: false })
     session.addEventListener('end', () => {
       if (active === session) active = null
       swap = null
@@ -320,6 +337,7 @@ export function install(g) {
       return
     }
     if (type === 'scenecapture') { captureDone(); return }
+    if (type === 'state' && pendingPresent !== null && headsetReady()) { const p = pendingPresent; pendingPresent = null; p.open().then(p.resolve, p.reject) }
     if (active === null) return
     if (type === 'state') device.dispatchHostEvent({ type: 'visibilitychange', visible: a > 0.5, focused: b > 0.5 })
     else if (type === 'rate') { if (a > 0) device.dispatchHostEvent({ type: 'frameratechange', rate: a }) }

@@ -11,6 +11,10 @@ import { install as installWebAudio } from './webaudio/index.js'
 import { install as installWebXR } from './webxr/index.js'
 import { install as installPlatform } from './platform/index.js'
 import { install as installRtc } from './rtc/index.js'
+import { install as installServiceWorker } from './serviceworker/index.js'
+import { install as installMedia } from './media/index.js'
+import { install as installIntl } from './intl/index.js'
+import { install as installStorage } from './storage/index.js'
 import { boot } from './boot.js'
 
 const g = globalThis
@@ -20,9 +24,14 @@ installFetch(g)
 installImages(g)
 installWebGL(g)
 installPageElements(g)  // after images/ and webgl/: a declared <canvas> is a real one
-installWorkers(g)
+const workers = installWorkers(g)
 installWebAudio(g)
 installWebXR(g)
 installPlatform(g)
 installRtc(g)  // only with __native.rtc (host.json network.webrtc)
-boot(g)
+installMedia(g)  // only with __native.media (host.json media.microphone); after webaudio/: createMediaStreamSource
+installIntl(g)  // only with __native.intl (host.json js.intl: the Android V8 with ICU)
+installStorage(g)  // only with __native.storage (host.json storage.indexedDB / storage.cache)
+// host.json web.serviceWorker (WP-27), before boot: a saved registration controls the page from its start
+const swStart = g.__native.config?.web?.serviceWorker === true ? installServiceWorker(g, { workers }) : undefined
+boot(g, swStart)

@@ -18,12 +18,15 @@ namespace {
 struct PendingRejection { v8::Global<v8::Promise> promise; v8::Global<v8::Value> value; };
 std::vector<PendingRejection> g_pendingRejections;
 
-void reportRejections(v8::Isolate* iso, void*) {
+void reportRejections(v8::Isolate* iso, void* engine) {
   if (g_pendingRejections.empty()) return;
   std::vector<PendingRejection> list = std::move(g_pendingRejections);
   g_pendingRejections.clear();
   v8::HandleScope hs(iso);
-  v8::Local<v8::Context> ctx = iso->GetCurrentContext();
+  // A checkpoint the host runs between tasks (Engine::pump) has no context entered: the page's, or ToString of the
+  // reason dereferences an empty one (V8 15.6 on the mac host crashed on hello-js's rejection on purpose).
+  v8::Local<v8::Context> ctx = iso->InContext() ? iso->GetCurrentContext() : ((Engine*)engine)->context();
+  v8::Context::Scope cs(ctx);
   for (auto& r : list) {
     v8::Local<v8::Value> v = r.value.Get(iso);
     std::string text = v.IsEmpty() ? "?" : Engine::toStdString(iso, v);
@@ -99,7 +102,7 @@ bool Engine::create(const v8::ResourceConstraints* rc) {
         if (g_pendingRejections[i].promise == p) { g_pendingRejections.erase(g_pendingRejections.begin() + (long)i); break; }
     }
   });
-  isolate_->AddMicrotasksCompletedCallback(reportRejections);
+  isolate_->AddMicrotasksCompletedCallback(reportRejections, this);
   v8::HandleScope hs(isolate_);
   v8::Local<v8::Context> ctx = v8::Context::New(isolate_);
   context_.Reset(isolate_, ctx);

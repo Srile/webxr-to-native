@@ -5,6 +5,7 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
+#include "audio/analyser.h"
 #include "audio/context.h"
 #include "audio/decode.h"
 #include "audio/device.h"
@@ -28,7 +29,10 @@ struct AudioBinding {
   std::vector<std::unique_ptr<CtxRec>> ctxs;  // index 0 unused
   std::unordered_map<uint32_t, AudioBufferData*> buffers; uint32_t nextBuffer = 1;
   std::unordered_map<uint32_t, v8::Global<v8::Function>> ended;
+  std::unordered_map<uint32_t, AnalyserState*> analysers;  // node handle -> the host's reference (the graph holds its own)
+  LiveInput* (*liveInput)(uint32_t trackId) = nullptr;     // the media module's tracks (WP-25), when it is built
   DecodeWorker decoder;
+  void dropAnalyser(uint32_t h) { auto it = analysers.find(h); if (it != analysers.end()) { it->second->unref(); analysers.erase(it); } }
 
   ContextBase* ctxOf(uint32_t handle, uint32_t* slot) {
     uint32_t ci = handle >> SLOT_BITS, s = handle & SLOT_MASK;
@@ -38,7 +42,9 @@ struct AudioBinding {
   }
   CtxRec* rec(uint32_t id) { return id < ctxs.size() ? ctxs[id].get() : nullptr; }
   static uint32_t handle(uint32_t ci, uint32_t slot) { return (ci << SLOT_BITS) | (slot == LISTENER_SLOT ? LISTENER_SLOT_JS : slot); }
-  Kind kindOf(ContextBase* c, uint32_t slot) { if (slot == LISTENER_SLOT) return Kind::Listener; Node* n = c->graph().node(slot); return n && n->used ? n->kind : Kind::None; }
+  // The host thread's record (ContextBase::kindOf), not the graph's node: a realtime context's render thread has not
+  // made a node created just now yet, so the page's first settings on it (a param's value, an analyser's size) would be lost.
+  Kind kindOf(ContextBase* c, uint32_t slot) { return c->kindOf(slot); }
   uint32_t addBuffer(AudioBufferData* b) { uint32_t id = nextBuffer++; buffers[id] = b; return id; }
   // Runs f on the host thread inside the engine's scopes.
   void post(std::function<void(v8::Isolate*, v8::Local<v8::Context>)> f) {
@@ -81,6 +87,7 @@ void closeContext(const Args& a) {
   if (r->rt) r->rt->close();
   // Final drain releases every buffer the graph still holds; ended callbacks for this context are dropped.
   for (auto it = g->ended.begin(); it != g->ended.end();) { if ((it->first >> SLOT_BITS) == id) it = g->ended.erase(it); else ++it; }
+  for (auto it = g->analysers.begin(); it != g->analysers.end();) { if ((it->first >> SLOT_BITS) == id) { it->second->unref(); it = g->analysers.erase(it); } else ++it; }
   g->ctxs[id].reset();
 }
 void contextTime(const Args& a) { CtxRec* r = g->rec(H(a, 0)); a.GetReturnValue().Set(r ? r->ctx->currentTime() : 0.0); }
@@ -96,7 +103,7 @@ void createNode(const Args& a) {
 }
 void releaseNode(const Args& a) {
   uint32_t slot; ContextBase* c = g->ctxOf(H(a, 0), &slot); if (!c || slot == 0 || slot == LISTENER_SLOT) return;
-  g->ended.erase(H(a, 0)); c->releaseNode(slot);
+  g->ended.erase(H(a, 0)); g->dropAnalyser(H(a, 0)); c->releaseNode(slot);
 }
 void connect(const Args& a) {
   uint32_t from, to; ContextBase* c = g->ctxOf(H(a, 0), &from); ContextBase* d = g->ctxOf(H(a, 2), &to);
@@ -160,6 +167,41 @@ void setBuffer(const Args& a) {
   uint32_t id = H(a, 1); AudioBufferData* b = nullptr;
   if (id) { auto it = g->buffers.find(id); if (it == g->buffers.end()) { a.GetReturnValue().Set(false); return; } b = it->second; }
   c->setBuffer(slot, b); a.GetReturnValue().Set(true);
+}
+
+// AnalyserNode (WP-25). analyserSize(node, fftSize): a new history and FFT of that size (fftSize validated by the
+// caller: a power of two in 32..32768), the old one released; the graph gets its own reference.
+void analyserSize(const Args& a) {
+  uint32_t slot; ContextBase* c = g->ctxOf(H(a, 0), &slot);
+  if (!c || g->kindOf(c, slot) != Kind::Analyser) { a.GetReturnValue().Set(false); return; }
+  AnalyserState* st = AnalyserState::create(bind::u32(a, 1));
+  if (!st) { a.GetReturnValue().Set(false); return; }
+  g->dropAnalyser(H(a, 0)); g->analysers[H(a, 0)] = st; c->setExt(slot, st);
+  a.GetReturnValue().Set(true);
+}
+// analyserTime(node, Float32Array|Uint8Array): the latest fftSize samples into the array (its own memory, no copy).
+void analyserTime(const Args& a) {
+  auto it = g->analysers.find(H(a, 0)); if (it == g->analysers.end() || a.Length() < 2) return;
+  bind::Bytes b = bind::bytes(a[1]); if (!b.ok) return;
+  if (a[1]->IsFloat32Array()) it->second->timeDomain((float*)b.data, (uint32_t)(b.len / 4));
+  else if (a[1]->IsUint8Array()) it->second->timeDomainBytes(b.data, (uint32_t)b.len);
+}
+// analyserFrequency(node, Float32Array|Uint8Array, smoothing, minDb, maxDb): the frequency data in dB, or as bytes.
+void analyserFrequency(const Args& a) {
+  auto it = g->analysers.find(H(a, 0)); if (it == g->analysers.end() || a.Length() < 2) return;
+  bind::Bytes b = bind::bytes(a[1]); if (!b.ok) return;
+  const double smoothing = bind::num(a, 2, 0.8), minDb = bind::num(a, 3, -100), maxDb = bind::num(a, 4, -30);
+  if (a[1]->IsFloat32Array()) it->second->frequency((float*)b.data, (uint32_t)(b.len / 4), smoothing);
+  else if (a[1]->IsUint8Array()) it->second->frequencyBytes(b.data, (uint32_t)b.len, smoothing, minDb, maxDb);
+}
+// setInput(node, trackId) → bool: a MediaStreamAudioSourceNode reads that capture track (WP-25; false without one).
+void setInput(const Args& a) {
+  uint32_t slot; ContextBase* c = g->ctxOf(H(a, 0), &slot);
+  if (!c || !c->realtime() || !g->liveInput || g->kindOf(c, slot) != Kind::MediaStream) { a.GetReturnValue().Set(false); return; }
+  LiveInput* in = g->liveInput(bind::u32(a, 1));
+  if (!in) { a.GetReturnValue().Set(false); return; }
+  c->setExt(slot, in); in->unref();  // setExt took the graph's reference; this one was the resolver's
+  a.GetReturnValue().Set(true);
 }
 
 void createBuffer(const Args& a) {
@@ -249,6 +291,8 @@ void stats(const Args& a) {
 
 }  // namespace
 
+void setAudioLiveInputs(audio::LiveInput* (*resolve)(uint32_t trackId)) { if (!g) g = new AudioBinding(); g->liveInput = resolve; }
+
 void installAudio(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc) {
   if (!g) g = new AudioBinding();
   g->svc = &svc;
@@ -273,6 +317,8 @@ void installAudio(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Host
   bind::fn(ctx, o, "createBuffer", createBuffer); bind::fn(ctx, o, "bufferInfo", bufferInfo); bind::fn(ctx, o, "channelData", channelData);
   bind::fn(ctx, o, "releaseBuffer", releaseBuffer); bind::fn(ctx, o, "detach", detach);
   bind::fn(ctx, o, "decodeAudio", decodeAudio); bind::fn(ctx, o, "offlineRender", offlineRender); bind::fn(ctx, o, "stats", stats);
+  bind::fn(ctx, o, "analyserSize", analyserSize); bind::fn(ctx, o, "analyserTime", analyserTime); bind::fn(ctx, o, "analyserFrequency", analyserFrequency);
+  if (g->liveInput) bind::fn(ctx, o, "setInput", setInput);
   bind::setStr(ctx, o, "codecs", decodableCodecs());
 }
 

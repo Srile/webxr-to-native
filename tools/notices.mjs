@@ -21,6 +21,8 @@ const HOSTS = {
   vision: [...COMMON, 'icu', 'angle', 'wamr', 'simde'],
 }
 const WEBRTC = ['libdatachannel', 'libjuice', 'usrsctp', 'plog', 'mbedtls']
+// Per-game switches that compile more third-party code in: web.svg (nanosvg), storage.indexedDB / storage.cache
+// (SQLite), and js.intl on Android (the V8 with ICU; every other host's V8 has ICU already).
 const EXTRA = {
   mac: 'ANGLE (libEGL, libGLESv2) from Electron 37.2.0: see LICENSES.chromium.html beside this file in the app.',
   win: 'ANGLE (libEGL.dll, libGLESv2.dll) and d3dcompiler_47.dll from Electron 37.2.0: see LICENSES.chromium.html\n' +
@@ -37,11 +39,13 @@ EXTRA.desktop = [EXTRA.mac, EXTRA.win, EXTRA.linux].join('\n')
 export const NOTICE_HOSTS = Object.keys(HOSTS)
 
 // The notices text for `host` (quest | phone | mac | win | linux | ios | vision | desktop); `webrtc` adds the WebRTC stack
-// (host.json network.webrtc); `platformSdk` notes the Meta Platform SDK loader when the game bundles it.
-export function notices(root, host, { webrtc = false, platformSdk = false } = {}) {
+// (host.json network.webrtc), `svg` nanosvg (web.svg), `storage` SQLite (storage.*), `intl` ICU on Android (js.intl);
+// `platformSdk` notes the Meta Platform SDK loader when the game bundles it.
+export function notices(root, host, { webrtc = false, svg = false, storage = false, intl = false, platformSdk = false } = {}) {
   const ids = HOSTS[host]
   if (!ids) throw new Error(`notices: unknown host "${host}" (${NOTICE_HOSTS.join(', ')})`)
-  const list = webrtc ? [...ids, ...WEBRTC] : ids
+  const list = [...ids, ...(intl && !ids.includes('icu') ? ['icu'] : []), ...(svg ? ['nanosvg'] : []),
+    ...(storage ? ['sqlite'] : []), ...(webrtc ? WEBRTC : [])]
   const rule = '='.repeat(79)
   let out = 'THIRD-PARTY SOFTWARE NOTICES\n\n' +
     'This application runs on webxr-to-native (https://github.com/Srile/webxr-to-native, MIT licence), which\n' +

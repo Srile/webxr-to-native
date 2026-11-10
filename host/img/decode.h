@@ -20,10 +20,13 @@ struct Image {
   bool ok() const { return error.empty() && width > 0 && height > 0; }
 };
 
-// PNG or JPEG bytes → RGBA8. Any other container fails with an error (the
-// asset set carries no WebP/GIF; KTX2 goes through its own transcoder).
-// Thread-safe: run it on any thread.
+// PNG, JPEG, WebP or SVG bytes → RGBA8. Any other container fails with an
+// error (KTX2 goes through its own transcoder). Thread-safe: run it on any thread.
+// SVG only in a build with HOST_HAS_SVG (nanosvg; CMake HOST_SVG, host.json web.svg).
 Image decode(const uint8_t* bytes, size_t len);
+
+// True when the bytes look like an SVG document (a BOM, whitespace, then markup with <svg near the start).
+bool isSvg(const uint8_t* bytes, size_t len);
 
 // RGBA8 → PNG file bytes. Empty on bad arguments.
 std::vector<uint8_t> encodePng(int width, int height, const uint8_t* rgba);

@@ -12,6 +12,45 @@ test('isSessionSupported: immersive-vr only, and only when native says so', asyn
   await assert.rejects(h2.g.navigator.xr.requestSession('immersive-vr'), { name: 'NotSupportedError' })
 })
 
+test('requestSession waits until the headset session is running, then opens on the state event', async () => {
+  let presenting = false
+  const h = harness({}, { state: () => ({ running: presenting, visible: false, focused: false, rate: 72 }) })  // IDLE, then READY
+
+  let session = null
+  const pending = h.g.navigator.xr.requestSession('immersive-vr', ALL_FEATURES).then((s) => { session = s })
+  await flush()
+  assert.equal(session, null)
+  await assert.rejects(h.g.navigator.xr.requestSession('immersive-vr'), { name: 'InvalidStateError' })
+  presenting = true
+  h.event('state', 0, 0)  // READY: not visible yet, but the native session has begun
+  await pending
+  assert.ok(session)
+  assert.ok(session.enabledFeatures.includes('local-floor'))
+  assert.equal(session.visibilityState, 'hidden')
+})
+
+test('a session opened while the runtime is READY starts hidden: no rAF callbacks until the state event says visible', async () => {
+  let visible = false
+  const h = harness({}, { state: () => ({ running: true, visible, focused: visible, rate: 72 }) })
+  const s = await h.session()
+  assert.equal(s.visibilityState, 'hidden')
+  const seen = []
+  s.addEventListener('visibilitychange', () => seen.push(s.visibilityState))
+  s.requestAnimationFrame(() => seen.push('frame'))
+  h.tick()
+  assert.deepEqual(seen, [], 'frames before VISIBLE are not handed to the page')
+  visible = true
+  h.event('state', 1, 1)  // FOCUSED
+  assert.deepEqual(seen, ['visible'])
+  h.tick()
+  assert.deepEqual(seen, ['visible', 'frame'])
+  // opened once the runtime is already focused: visible from the start, as a browser's session is
+  await s.end()
+  const s2 = await h.session()
+  assert.equal(s2.visibilityState, 'visible')
+})
+
+
 test('requestSession rejects unsupported modes and required features, drops unsupported optional ones', async () => {
   const h = harness()
   await assert.rejects(h.g.navigator.xr.requestSession('immersive-ar'), { name: 'NotSupportedError' })

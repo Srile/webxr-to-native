@@ -1,11 +1,14 @@
 // WP-08 DSP tests: graphs rendered offline on the Mac, asserted against the
 // Web Audio spec's formulas computed independently here.
+#include "audio/analyser.h"
 #include "audio/decode.h"
+#include "audio/live_ring.h"
 #include "audio/offline.h"
 #include "audio/webm.h"
 #ifdef HOST_HAS_OPUS
 #include <opus.h>
 #endif
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -262,6 +265,7 @@ static void testLifetime() {
   // a never-started source released → freed at once; g2 released with no inputs → freed
   uint32_t idle = c.createNode(Kind::BufferSource); c.connect(idle, g2); c.releaseNode(idle); c.releaseNode(g2);
   countMsgs(c, &ended, &freed); CHECK(freed == 4, "idle source + emptied gain freed (freed %d)", freed);
+  CHECK(c.kindOf(again) == Kind::Gain && c.kindOf(idle) == Kind::None && c.kindOf(0) == Kind::Destination, "the host thread's kinds: made %d, freed %d", (int)c.kindOf(again), (int)c.kindOf(idle));
   b->unref();
 }
 
@@ -507,8 +511,118 @@ static void testWebm() {
   }
 }
 
+// 10. AnalyserNode (WP-25): pulled with nothing downstream, its input passed through, the most recent fftSize
+// samples, the spec's frequency data (a Blackman-windowed 1/N DFT: an amplitude-1 sine on a bin centre reads
+// 0.5 * 0.42 = 0.21, -13.56 dB), smoothing over time, one computation per render quantum, the byte forms.
+static void testAnalyser() {
+  const double R = 48000; const uint32_t N = 2048, Q = QUANTUM;
+  OfflineContext c(1, 48000, R);
+  uint32_t o = c.createNode(Kind::Oscillator); c.setParam(o, 0, 1500); c.start(o, 0, 0, 0);  // 1500 Hz: bin 64 of 2048 at 48 kHz
+  uint32_t an = c.createNode(Kind::Analyser);
+  AnalyserState* st = AnalyserState::create(N); c.setExt(an, st);
+  CHECK(!AnalyserState::create(48) && !AnalyserState::create(16) && !AnalyserState::create(65536) && AnalyserState::create(32)->fftSize() == 32, "fftSize validation");
+  c.connect(o, an);  // to nothing: a meter
+  for (int i = 0; i < 40; i++) c.renderQuantum();
+  std::vector<float> td(N); st->timeDomain(td.data(), N);
+  double maxErr = 0; for (uint32_t i = 0; i < N; i++) maxErr = std::max(maxErr, std::fabs(td[i] - std::sin(2 * PI * 1500 * (40 * Q - N + i) / R)));
+  CHECK(maxErr < 1e-4, "analyser time domain: max error %g", maxErr);
+  CHECK(c.graph().destOut(0)[5] == 0, "analyser connected to nothing: the destination stays silent");
+  std::vector<float> fd(N / 2); st->frequency(fd.data(), N / 2, 0.0);
+  uint32_t peak = 0; for (uint32_t k = 1; k < N / 2; k++) if (fd[k] > fd[peak]) peak = k;
+  CHECK(peak == 64 && std::fabs(fd[64] - db(0.21)) < 0.05, "analyser peak bin %u at %.2f dB (want 64 at %.2f)", peak, fd[peak], db(0.21));
+  CHECK(fd[300] < -100, "analyser far from the tone: %.1f dB", fd[300]);
+  std::vector<uint8_t> fb(N / 2); st->frequencyBytes(fb.data(), N / 2, 0.0, -100, -30);
+  CHECK(fb[64] == 255 && fb[300] == 0, "analyser bytes: peak %d, far %d", fb[64], fb[300]);
+  st->frequencyBytes(fb.data(), N / 2, 0.0, -20, -10);
+  CHECK(fb[64] == (uint8_t)std::floor(255.0 / 10 * (fd[64] + 20)), "analyser bytes scaled between min and max: %d", fb[64]);
+  std::vector<uint8_t> tb(N); st->timeDomainBytes(tb.data(), N);
+  CHECK(tb[0] == (uint8_t)std::min(255.0, std::floor(128.0 * (1.0 + (double)td[0]))), "analyser time-domain bytes %d", tb[0]);
+  // Smoothing over time, per the spec: 0.5 * previous + 0.5 * now. A fresh state starts from 0.
+  AnalyserState* sm = AnalyserState::create(N); uint32_t an2 = c.createNode(Kind::Analyser); c.setExt(an2, sm); c.connect(o, an2);
+  for (int i = 0; i < 20; i++) c.renderQuantum();
+  sm->frequency(fd.data(), N / 2, 0.5); const float first = fd[64];
+  sm->frequency(fd.data(), N / 2, 0.5);
+  CHECK(fd[64] == first, "no new render quantum: the same frequency data (%.3f %.3f)", first, fd[64]);
+  c.renderQuantum(); sm->frequency(fd.data(), N / 2, 0.5);
+  CHECK(std::fabs(first - db(0.105)) < 0.05 && std::fabs(fd[64] - db(0.1575)) < 0.05, "smoothing: %.2f then %.2f dB (want %.2f, %.2f)", first, fd[64], db(0.105), db(0.1575));
+  // Its input disconnected, it records silence.
+  c.disconnect(o, an); for (int i = 0; i < 20; i++) c.renderQuantum(); st->timeDomain(td.data(), N);
+  CHECK(td[N - 1] == 0 && td[0] == 0, "analyser without input records silence");
+  // Passes its input through.
+  uint32_t an3 = c.createNode(Kind::Analyser); c.connect(o, an3); c.connect(an3, 0); c.renderQuantum();
+  CHECK(std::fabs(c.graph().destOut(0)[10] - std::sin(2 * PI * 1500 * (81 * Q + 10) / R)) < 1e-4, "analyser passes its input through: %f", c.graph().destOut(0)[10]);
+  st->unref(); sm->unref();
+}
+
+// 11. Capture (WP-25): the ring between a microphone callback and the render threads, and the
+// MediaStreamAudioSourceNode over it. A 441 Hz tone captured at 44.1 kHz in 10 ms bursts plays at 48 kHz as 441 Hz;
+// silence before the ring is primed, on an underrun, while the track is disabled; the oldest samples dropped when
+// a reader falls far behind; two readers see the same samples; the node goes once released and its track ended.
+struct TestTrack : LiveInput {
+  CaptureRing* ring; bool on = true, alive = true;
+  bool read(LiveCursor& c, float* out, int n, double rate) override { if (!on || !alive) { c.primed = c.waiting = false; return false; } return ring->read(c, out, n, rate); }
+  bool live() const override { return alive; }
+};
+static void testCapture() {
+  const double R = 48000, CR = 44100;
+  CaptureRing ring; ring.setRate(CR);
+  TestTrack* tr = new TestTrack(); tr->ring = &ring;
+  OfflineContext c(1, 1, R);
+  uint32_t src = c.createNode(Kind::MediaStream); c.setExt(src, tr); c.connect(src, 0);
+  uint32_t gx = c.createNode(Kind::Gain);
+  CHECK(!c.graph().connect(gx, src) && !c.graph().connect(src, src), "nothing connects into a media stream source");
+  uint64_t produced = 0; float burst[441];
+  auto capture = [&](double untilS) {  // the microphone: 441 samples every 10 ms of the context's time
+    while ((double)produced / CR < untilS) { for (int i = 0; i < 441; i++) burst[i] = 0.5f * (float)std::sin(2 * PI * 441 * (double)(produced + i) / CR); ring.write(burst, 441); produced += 441; }
+  };
+  std::vector<float> out;
+  auto render = [&](int quanta, bool feed) {
+    for (int q = 0; q < quanta; q++) { if (feed) capture(c.currentTime() + 0.01); c.renderQuantum(); const float* d = c.graph().destOut(0); out.insert(out.end(), d, d + QUANTUM); }
+  };
+  render(1, false);
+  CHECK(rms(out.data(), 0, QUANTUM) == 0, "nothing captured yet: silence");
+  out.clear(); render(400, true);  // ~1.07 s
+  uint32_t first = 0; while (first < out.size() && out[first] == 0) first++;
+  CHECK(first < 48000 * 0.05, "primed within 50 ms (first sample at %u)", first);
+  int zc = 0; const uint32_t a = first + 2000, b = (uint32_t)out.size();
+  for (uint32_t i = a + 1; i < b; i++) zc += (out[i - 1] < 0) != (out[i] < 0);
+  const double want = 2 * 441.0 * (b - a) / R;
+  CHECK(std::fabs(zc - want) <= 2, "resampled 44.1 -> 48 kHz: %d zero crossings (want %.1f)", zc, want);
+  CHECK(std::fabs(rms(out.data(), a, b) - 0.5 / std::sqrt(2.0)) < 0.01, "resampled level %.4f", rms(out.data(), a, b));
+  double step = 0; for (uint32_t i = a + 1; i < b; i++) step = std::max(step, (double)std::fabs(out[i] - out[i - 1]));
+  CHECK(step < 0.5 * 2 * PI * 441 / R * 1.1, "no discontinuity (largest step %.4f)", step);
+  CHECK(ring.underruns() == 0 && ring.overruns() == 0, "steady capture: %u underruns, %u overruns", ring.underruns(), ring.overruns());
+  // The capture stalls: what is buffered plays out, then silence (an underrun), then it primes again.
+  out.clear(); render(30, false);
+  CHECK(out.back() == 0 && ring.underruns() == 1, "stalled capture: silence, %u underrun(s)", ring.underruns());
+  out.clear(); render(40, true);
+  CHECK(rms(out.data(), (uint32_t)out.size() - 1000, (uint32_t)out.size()) > 0.3, "capture back: sound again");
+  // Disabled: silence at once; enabled: sound again.
+  tr->on = false; out.clear(); render(2, true); CHECK(rms(out.data(), 0, (uint32_t)out.size()) == 0, "disabled track: silence");
+  tr->on = true; out.clear(); render(20, true); CHECK(rms(out.data(), (uint32_t)out.size() - 500, (uint32_t)out.size()) > 0.3, "enabled again: sound");
+  // A reader that falls behind (its context suspended) drops the oldest samples instead of lagging.
+  capture(c.currentTime() + 0.5); out.clear(); render(1, false);
+  CHECK(ring.overruns() == 1, "fell 0.5 s behind: the oldest dropped (%u overruns)", ring.overruns());
+  // Two readers of one ring, primed at the same moment, read the same samples.
+  LiveCursor c1, c2; float x1[QUANTUM], x2[QUANTUM];
+  bool r1 = ring.read(c1, x1, QUANTUM, R), r2 = ring.read(c2, x2, QUANTUM, R);
+  CHECK(r1 && r2 && memcmp(x1, x2, sizeof x1) == 0, "two readers: the same samples");
+  // Same rate: samples copied exactly.
+  CaptureRing same; same.setRate(R); float in[480]; for (int k = 0; k < 20; k++) { for (int i = 0; i < 480; i++) in[i] = (float)(k * 480 + i); same.write(in, 480); }
+  LiveCursor c3; float y[QUANTUM]; CHECK(same.read(c3, y, QUANTUM, R) && y[1] == y[0] + 1 && y[127] == y[0] + 127, "same rate: exact copy (%f %f)", y[0], y[127]);
+  // Lifetime: released while live stays (the graph holds the track); ended -> freed, the track's reference back.
+  c.releaseNode(src); c.renderQuantum(); int ended = 0, freed = 0; countMsgs(c, &ended, &freed);
+  CHECK(freed == 0 && tr->refs.load() == 2, "released, track live: kept (freed %d, refs %d)", freed, tr->refs.load());
+  tr->alive = false; c.renderQuantum(); countMsgs(c, &ended, &freed);
+  CHECK(freed == 1 && tr->refs.load() == 1, "track ended: node freed, reference returned (freed %d, refs %d)", freed, tr->refs.load());
+  // A wrong-kind state is refused (released back), never cast.
+  uint32_t g1 = c.createNode(Kind::Gain); tr->ref(); c.graph().setExt(g1, tr); countMsgs(c, &ended, &freed);
+  CHECK(tr->refs.load() == 1, "setExt on a gain node refused (refs %d)", tr->refs.load());
+  tr->unref();
+}
+
 int main() {
-  testLowpass(); testAutomation(); testBufferSource(); testPanner(); testCompressor(); testOscillator(); testLifetime(); testDecode(); testWebm();
+  testLowpass(); testAutomation(); testBufferSource(); testPanner(); testCompressor(); testOscillator(); testLifetime(); testDecode(); testWebm(); testAnalyser(); testCapture();
   if (failures) { fprintf(stderr, "audio_test: %d failure(s)\n", failures); return 1; }
   puts("audio_test ok"); return 0;
 }

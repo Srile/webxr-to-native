@@ -1,0 +1,23 @@
+{
+  "app": {
+    "name": "hello-sw",
+    "package": "gg.dmnshd.webxrhost.hellosw"
+  },
+  "mode": "js",
+  "web": {
+    "origin": "https://app.local",
+    "query": "",
+    "serviceWorker": true
+  },
+  "storage": {
+    "cache": true
+  },
+  "xr": {
+    "autoEnter": false
+  },
+  "debug": {
+    "inspector": true,
+    "port": 9234,
+    "serviceWorker": true
+  }
+}

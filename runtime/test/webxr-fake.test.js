@@ -19,7 +19,10 @@ export function fakeXr(over = {}) {
     requestRefreshRate(hz) { xr.rateRequests.push(hz); return true },
     setFoveation(v) { xr.foveation = v; return true },
     vibrate(hand, amp, s, hz) { xr.vibrations.push([hand, amp, s, hz]) },
-    state() { return { running: !!xr.begun, visible: true, focused: true, rate: 72 } },
+    // The runtime's session as on a worn Quest: begun and showing before the page asks (a test that wants the
+    // headset not ready overrides state)
+    state() { return { running: true, visible: true, focused: true, rate: 72 } },
+
     // immersive-ar (webxr-scene.test.js): a VR-only system by default
     capsResult: { passthrough: false, scene: false, capture: false, hands: true },
     caps() { return { ...xr.capsResult } },

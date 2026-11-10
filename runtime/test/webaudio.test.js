@@ -267,6 +267,15 @@ test('audio.ts shapes: live patch, bake, hold, positional sample', async () => {
   assert.equal(A.log.filter(e => e[0] === 'createNode' && e[1] === off._id).length, calls(A, 'createNode').filter(e => e[1] === off._id).length)
 })
 
+test('MediaStream is a constructor, so adapter.js does not store undefined and Howler can use instanceof', () => {
+  const g = Object.create(null); g.__native = fakeNative({ audio: fakeAudio() }); installCore(g); installWebAudio(g)
+  assert.equal(typeof g.MediaStream, 'function')
+  assert.equal('x' instanceof g.MediaStream, false)
+  assert.equal(new g.MediaStream() instanceof g.MediaStream, true)
+  g.MediaStream = g.MediaStream || g.webkitMediaStream
+  assert.equal(typeof g.MediaStream, 'function')
+})
+
 test('no __native.audio: install logs and leaves the globals undefined', () => {
   const g = Object.create(null); g.__native = fakeNative({ audio: {} }); installCore(g); installWebAudio(g); assert.equal(g.AudioContext, undefined)
 })

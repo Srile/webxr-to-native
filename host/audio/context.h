@@ -42,9 +42,14 @@ class ContextBase {
   void stop(uint32_t slot, double when) { Command c; c.op = Op::Stop; c.a = slot; c.t = when; issue(c); }
   // Takes a reference on buf for the node; released through Msg::ReleaseBuffer.
   void setBuffer(uint32_t slot, AudioBufferData* buf) { if (buf) buf->ref(); Command c; c.op = Op::SetBuffer; c.a = slot; c.ptr = buf; issue(c); }
+  // Hands the node a reference on s (an AnalyserState, a LiveInput); released through Msg::ReleaseExt.
+  void setExt(uint32_t slot, Shared* s) { if (s) s->ref(); Command c; c.op = Op::SetExt; c.a = slot; c.ptr = s; if (!issue(c) && s) s->unref(); }
   float paramValue(uint32_t slot, int param) const { return graph_->paramValue(slot, param); }
   float reduction(uint32_t slot) const { return graph_->reduction(slot); }
 
+  // A slot's kind as this thread made it (Kind::None once freed). Not the graph's own node, which a realtime context
+  // creates on its render thread when it applies the queued command: a node just made is not there yet.
+  Kind kindOf(uint32_t slot) const { return slot == LISTENER_SLOT ? Kind::Listener : slot < kinds_.size() ? kinds_[slot] : Kind::None; }
   // Drains the graph's messages: frees slots and buffer references here, then hands Ended/Freed to `on`.
   void drain(const std::function<void(const Msg&)>& on);
   uint32_t liveSlots() const { return nextSlot_ - 1 - (uint32_t)free_.size(); }
@@ -55,6 +60,7 @@ class ContextBase {
   uint32_t allocSlot();
   std::unique_ptr<Graph> graph_;
   std::vector<uint32_t> free_;
+  std::vector<Kind> kinds_;  // host thread: kindOf()
   uint32_t nextSlot_ = 1, capacity_ = 0, chunkSize_;
   bool realtime_;
 };

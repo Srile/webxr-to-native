@@ -54,6 +54,10 @@ ok "stb"
 DRLIBS_SHA="aec2dd20667f54acfdb66031217df6d240f56c52"
 mkdir -p "$TP/dr_libs"; dl "https://raw.githubusercontent.com/mackron/dr_libs/$DRLIBS_SHA/dr_mp3.h" "$TP/dr_libs/dr_mp3.h"
 ok "dr_mp3"
+NANOSVG_SHA="239e102ec2c691f2902e20ace2ed36ee4a35cfe6"
+mkdir -p "$TP/nanosvg"
+for f in nanosvg.h nanosvgrast.h; do dl "https://raw.githubusercontent.com/memononen/nanosvg/$NANOSVG_SHA/src/$f" "$TP/nanosvg/$f"; done
+ok "nanosvg"
 if [ ! -f "$TP/libwebp/CMakeLists.txt" ]; then
   rm -rf "$TP/libwebp"; curl -fsSL https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.5.0.tar.gz | tar xz -C "$TP" && mv "$TP/libwebp-1.5.0" "$TP/libwebp"
 fi

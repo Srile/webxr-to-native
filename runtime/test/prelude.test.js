@@ -2,6 +2,7 @@ import test from 'node:test'; import assert from 'node:assert/strict'
 import { fakeNative } from './fake-native.js'
 // Install the prelude's core pieces onto a sandbox object (not node's global).
 import { install as installCore, installPageElements } from '../src/dom-lite/index.js'
+import { boot } from '../src/boot.js'
 import { install as installFetch } from '../src/fetch/index.js'
 function sandbox(over) { const g = Object.create(null); g.__native = fakeNative(over); g.Promise = Promise; g.WebAssembly = Object.create(globalThis.WebAssembly); g.crypto = { getRandomValues: (a) => globalThis.crypto.getRandomValues(a), randomUUID: () => globalThis.crypto.randomUUID() }; installCore(g); installFetch(g); installPageElements(g); return g }
 test('window/document basics', () => { const g = sandbox({ config: { web: { origin: 'https://app.local', entry: 'assets/index.js', elements: [{ tag: 'div', id: 'scene-container', class: '', parent: null }, { tag: 'div', id: 'loading', class: 'a b', parent: null }, { tag: 'div', id: 'loading-fill', class: '', parent: 'loading' }] } } }); assert.equal(g.window, g); assert.equal(g.location.origin, 'https://app.local'); assert.equal(g.document.getElementById('loading-fill').parentNode.id, 'loading'); assert.ok(g.document.getElementById('loading').classList.contains('b')); const c = g.document.getElementById('scene-container'); assert.equal(c.clientWidth, 1280); assert.ok(g.document.body.contains(c)); const l = g.document.getElementById('loading'); l.style.display = 'none'; assert.equal(l.style.display, 'none'); l.classList.add('gone'); assert.ok(l.classList.contains('gone')); l.remove(); assert.equal(l.parentNode, null); assert.equal(g.document.getElementById('loading'), null) })
@@ -41,6 +42,25 @@ test('page elements: the whole tree from pack.mjs (parent indices, attributes); 
   assert.equal(d.querySelector('div::before'), null, 'an unsupported selector matches nothing, without throwing')
   assert.equal(d.querySelector('#box input'), d.querySelector('#box input'), 'a cached parse gives the same answer')
 })
+test('a classic script given its src by setAttribute loads when it is inserted', async () => {
+  const token = '__webxrHostScriptAttr'
+  delete globalThis[token]
+  const js = `globalThis.${token} = 7`
+  const g = sandbox({ assets: { read: (p) => p === 'ammo/ammo.wasm.js' ? new TextEncoder().encode(js).buffer : null, readText: () => null, exists: () => true, mime: () => 'text/javascript' } })
+  const s = g.document.createElement('script')
+  let loaded = 0
+  s.onload = () => loaded++
+  s.setAttribute('src', '/ammo/ammo.wasm.js')
+  await Promise.resolve()
+  assert.equal(loaded, 0)
+  assert.equal(globalThis[token], undefined)
+  g.document.body.appendChild(s)
+  await new Promise(r => setTimeout(r, 50))
+  assert.equal(loaded, 1)
+  assert.equal(globalThis[token], 7)
+  assert.equal(s.getAttribute('src'), '/ammo/ammo.wasm.js')
+  delete globalThis[token]
+})
 test('pointer lock: requestPointerLock resolves, sets pointerLockElement, fires pointerlockchange, asks native; exitPointerLock releases; query results are NodeLists', async () => {
   const calls = []; const g = sandbox({ input: { pointerLock: (on) => { calls.push(on); return true } } }); const d = g.document
   const el = d.createElement('div'); d.body.appendChild(el); let changes = 0; d.addEventListener('pointerlockchange', () => changes++)
@@ -48,4 +68,12 @@ test('pointer lock: requestPointerLock resolves, sets pointerLockElement, fires 
   d.exitPointerLock(); assert.equal(d.pointerLockElement, null); d.exitPointerLock()
   assert.deepEqual(calls, [true, false]); assert.equal(changes, 2)
   const all = d.querySelectorAll('div'); assert.ok(all instanceof g.NodeList && Array.isArray(all) && all.item(0) === el)
+})
+test('inline scripts from index.html run before the entry module', async () => {
+  const ran = []
+  const g = sandbox({ config: { web: { origin: 'https://app.local', entry: 'missing-entry.js', inlineScripts: ['1+1', '2+2'] } } })
+  g.__hostEvalScript = (text, name) => ran.push(name + ':' + text.trim())
+  boot(g)
+  await new Promise(r => setImmediate(r))
+  assert.deepEqual(ran, ['index.html:1+1', 'index.html:2+2'])
 })

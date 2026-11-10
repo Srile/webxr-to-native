@@ -35,6 +35,7 @@ development and experiments; the Quest is the main target.
 
 - **JavaScript**: V8 (Android: V8 14.9 with the JIT), ES modules, dynamic `import()`, `import.meta.url`, Workers,
   WebAssembly (V8's, or WAMR's interpreter where V8 has none), `structuredClone`, timers, `requestAnimationFrame`.
+  `Intl` with the device's locale and time zone (on Android opt-in with `js.intl`, which links a V8 with ICU).
 - **WebGL 2** over the device's GLES 3.2:
   - The extensions three.js and Wonderland probe, including `OVR_multiview2` and `WEBGL_multi_draw` (as
     indirect draws where the driver has them).
@@ -53,14 +54,22 @@ development and experiments; the Quest is the main target.
   - A native graph, rendered on the audio thread: gain, buffer sources, oscillators, biquad, compressor, panner,
     listener, `OfflineAudioContext`.
   - `decodeAudioData` takes WAV, Ogg Vorbis, Ogg Opus, WebM (Opus, Vorbis) and MP3.
+  - `AnalyserNode`, and, opt-in with `media.microphone`, the microphone: `getUserMedia({ audio })` (the headset's
+    permission prompt, echo cancellation) into a `MediaStreamAudioSourceNode`.
 - **Network and storage**:
   - `fetch` and `XMLHttpRequest` read from the bundled assets, and from an allow-list of HTTPS origins.
   - `localStorage` and `Blob` URLs.
-  - WebSocket and WebRTC data channels, opt-in per game.
+  - Opt-in per game:
+    - WebSocket and WebRTC data channels.
+    - IndexedDB and the Cache API, on SQLite, kept across launches, in the page and in workers.
+    - Service workers. A registered worker answers the page's loads as `FetchEvent`s, and controls the page from
+      the start of the next launch.
 - **Images**: `createImageBitmap`, `<img>`, PNG, JPEG and WebP decoding off the main thread, and a Canvas 2D
-  subset (enough for UI atlases and text measurement).
+  subset (paths, `Path2D`, clipping, compositing, drawing images: enough for UI atlases). Opt-in: text drawing
+  with `FontFace` fonts (`web.canvasText`) and SVG images (`web.svg`).
 - **The page**:
   - A light DOM: `document`, the elements `index.html` declares, events, pointer and keyboard input outside XR.
+  - `index.html`'s classic inline scripts, run before the entry as in a browser (opt-in: `web.inlineScripts`).
   - `navigator.userAgent` reads like Quest Browser's (Chrome for Android's in a phone build).
   - `navigator.horizon` exposes the Meta Platform SDK (entitlement, user, leaderboards, achievements) when the
     app bundles it.
@@ -69,7 +78,7 @@ What it does not do:
 - The page's HTML and CSS are never laid out or drawn: there is no layout engine. Menus have to be in the 3D
   scene. Where a page's HTML UI would make a choice (a "VR" button, a privacy prompt), a short boot script can
   make it: `web.inject` below.
-- No `<video>` or `<audio>` playback, no `Intl` on the Quest (its V8 has no ICU), no WebGPU.
+- No `<video>` or `<audio>` playback, no camera, no WebGPU.
 
 ## How it works
 
@@ -103,7 +112,7 @@ You need:
 ```sh
 git clone https://github.com/Srile/webxr-to-native.git && cd webxr-to-native
 npm ci                     # esbuild and IWER
-./tools/setup.sh           # JDK, Android SDK + NDK r27, V8, OpenXR loader, Oboe, stb, dr_mp3, libopus, libwebp
+./tools/setup.sh           # JDK, Android SDK + NDK r27, V8, OpenXR loader, Oboe, stb, dr_mp3, libopus, libwebp, nanosvg
 source tools/env.sh        # puts the repo-local adb, NDK and JDK on PATH
 node tools/device.mjs status
 node tools/pack.mjs apps/hello-xr/host.json --install --run    # a stereo clear and a cube, no JS
@@ -136,9 +145,9 @@ so read it at https://developer.android.com/studio/terms first. XR apps only ren
    npm run quest ../my-game
    ```
 
-`pack.mjs` copies the build into the APK's assets and reads the module entry out of `index.html`. It also
-rewrites what V8 without ICU cannot parse (Unicode property escapes in regexes), builds the native library and
-packs, signs, installs and starts the APK.
+`pack.mjs` copies the build into the APK's assets and reads the module entry out of `index.html`. Unless the game
+turns on `js.intl`, it also rewrites what V8 without ICU cannot parse (Unicode property escapes in regexes). Then it
+builds the native library and packs, signs, installs and starts the APK.
 
 ### Release builds
 
@@ -147,13 +156,16 @@ KEYSTORE_PASS=... KEYSTORE_ALIAS=... node tools/pack.mjs ../my-game --release --
 ```
 
 A release build is signed with your keystore. The passwords are passed to apksigner as environment references,
-never as arguments. The inspector is off in a release build. Uploading to a store is up to the game (Meta's
-`ovr-platform-util` takes the APK as it is).
+never as arguments. The inspector is off in a release build, and the runtime ships minified without its source
+map (0.7 MB instead of 2.6). Uploading to a store is up to the game (Meta's `ovr-platform-util` takes the APK as it
+is).
 
 ## host.json
 
 Paths are relative to the `host.json`. Every key is optional except `app.package` for an APK and `web.dist` for a
-game.
+game. The web features a WebGL game rarely needs (Intl on Android, the microphone, IndexedDB, the Cache API,
+service workers, Canvas text, SVG, inline scripts, WebRTC) are off unless the game turns them on. A game that
+leaves one off carries none of its native code or permissions, and its page does not see the API.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -169,13 +181,22 @@ game.
 | `web.exclude` | | globs of files not to pack (`*.map`, …) |
 | `web.inject` | | the game's own boot scripts, imported before the entry: where the HTML UI would have made a choice |
 | `web.startGesture` | `false` | phones: treat launch as the first tap, for pages that wait for one before starting sound |
+| `web.inlineScripts` | `false` | run `index.html`'s classic inline scripts before the entry |
+| `web.canvasText` | `false` | Canvas 2D `fillText`/`measureText` and `FontFace` (stb_truetype); off, text is measured by estimate and not drawn |
+| `web.svg` | `false` | SVG images (nanosvg) |
+| `web.serviceWorker` | `false` | `navigator.serviceWorker`; `debug.serviceWorker` logs every load it answers |
 | `network.allow` | `[]` | origins `fetch`, XHR and WebSocket may reach; everything else is refused |
 | `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game |
+| `storage.indexedDB`, `storage.cache` | `false` | IndexedDB, the Cache API (SQLite, under the app's files) |
+| `storage.quotaMB` | `1024` | the origin's databases together; past it a write fails with `QuotaExceededError` |
+| `media.microphone` | `false` | `getUserMedia` for audio; adds the `RECORD_AUDIO` permission, asked for on first use (Android, macOS) |
+| `js.intl` | `false` | Android: link the V8 with ICU (+4.5 MB APK) for `Intl`; the other hosts always have it |
 | `xr.autoEnter` | `false` | grant the page's `offerSession` at launch (enter XR without a click) |
 | `xr.preferredRate` | the runtime's | display refresh rate to ask for (72, 80, 90, 120) |
 | `xr.foveation` | the page's | fixed foveation 0..1, overriding what the page sets |
 | `xr.foveationDynamic` | `false` | let the runtime lower foveation when the GPU has headroom |
 | `xr.invalidate` | `true` | discard depth after each frame (saves bandwidth on tilers) |
+| `xr.clearFrame` | `false` | clear an `XRWebGLLayer` before each frame, as a browser does (one queued GL op); for engines that do not clear it themselves, like Wonderland |
 | `xr.perf` | | CPU/GPU performance levels (`XR_EXT_performance_settings`): `{ enabled, start, adaptive, … }` |
 | `gl.thread` | `true` (Quest) | run the page's GL calls on a GL thread; `adb shell setprop debug.webxr.glthread 0` overrides it |
 | `gl.pipeline` | `false` | with the thread: record the next XR frame while the GL thread draws this one (one frame more latency) |
@@ -225,41 +246,47 @@ Each one stages the game's assets exactly as `pack.mjs` stages the APK's, and ta
 | visionOS | `tools/setup-v8-apple.sh`, `tools/setup-angle-apple.sh` (V8 and ANGLE for visionOS, downloaded from this repository's releases; `--build` builds them from source) | `node tools/ios.mjs <game> --vision` (runs both when a slice is missing) |
 | Android phone | `tools/setup.sh [--emulator]` | `npm run phone <game>` |
 
-### Prebuilt Apple libraries
+### Prebuilt libraries
 
-V8 for iOS and visionOS and ANGLE for visionOS have no upstream prebuilts, so this repository publishes them as
-release assets:
-- **[`v8-apple-15.6.75.19`](https://github.com/Srile/webxr-to-native/releases/tag/v8-apple-15.6.75.19):** four
-  slices (`ios-arm64`, `iossim-arm64`, `xros-arm64`, `xrsim-arm64`) and the headers with ICU data.
-- **[`angle-apple-2.1.28853`](https://github.com/Srile/webxr-to-native/releases/tag/angle-apple-2.1.28853):**
-  `xros-arm64` and `xrsim-arm64`, and the headers.
+Some of the libraries have no upstream prebuilt that fits, so this repository publishes them as release assets:
+- **[`v8-android-intl-14.9.207.39`](https://github.com/Srile/webxr-to-native/releases/tag/v8-android-intl-14.9.207.39):**
+  V8 for Android with ICU, for games with `js.intl` (the stock Android V8 has no `Intl`). A build fetches it the
+  first time a game asks (`tools/setup-v8-android-intl.sh`).
+- **[`v8-apple-15.6.75.19`](https://github.com/Srile/webxr-to-native/releases/tag/v8-apple-15.6.75.19):** V8 for
+  iOS and visionOS, four slices (`ios-arm64`, `iossim-arm64`, `xros-arm64`, `xrsim-arm64`) and the headers with ICU
+  data.
+- **[`angle-apple-2.1.28853`](https://github.com/Srile/webxr-to-native/releases/tag/angle-apple-2.1.28853):** ANGLE
+  for visionOS, `xros-arm64` and `xrsim-arm64`, and the headers.
 
 The setup scripts download them and check them against the SHA-256 they pin. With `--build` they build the same
-thing from source instead: about 40 minutes per V8 slice and 20 per ANGLE slice, plus 17 GB of checkouts. Each
-archive carries the licences of what it contains, in `LICENSES/`.
+thing from source instead: one to three hours for the Android V8, about 40 minutes per Apple V8 slice and 20 per
+ANGLE slice, plus 10 to 17 GB of checkouts. Each archive carries the licences of what it contains, in `LICENSES/`.
 
 ## Tests
 
 ```sh
 npm run test:runtime                                   # the JS runtime against fake natives (node --test)
 cmake -S host -B build-tests -G Ninja -DHOST_TESTS=ON && ninja -C build-tests
-for t in json_test loop_test audio_test image_test gl_queue_test; do build-tests/$t; done
+for t in json_test loop_test audio_test image_test gl_queue_test storage_test; do build-tests/$t; done
 node tools/test.mjs                                    # on a headset: every app in apps/ against its expected.png
 ```
 
-The native unit tests need the sources `tools/setup-linux.sh --sources` (or `tools/setup.sh`) fetches.
+The native unit tests need the sources `tools/setup-linux.sh --sources` (or `tools/setup.sh`) fetches;
+`storage_test` is built once `tools/setup-storage.sh` has fetched SQLite.
 `apps/bench` holds IWSDK stress scenes that run unchanged in Quest Browser and on the host, for comparing frame
 costs (`tools/bench.mjs`).
 
 ## Layout
 
 ```
-host/        the native host (C++20, CMake): app/ core/ gl/ js/ xr/ audio/ img/ net/ store/ platform/ rtc/,
+host/        the native host (C++20, CMake): app/ core/ gl/ js/ xr/ audio/ img/ net/ store/ platform/ rtc/
+             media/ (microphone) storage/ (IndexedDB, Cache API),
              android/ the Quest and phone glue, emu/ the emulated headset of the desktop hosts, mac/ win/ linux/
              ios/ vision/, wamr/ the WebAssembly interpreter build, tests/ native unit tests
 runtime/     the browser surface in JavaScript (runtime/src) and its tests (runtime/test)
 android/     the Gradle shell that packs the native library, the runtime and the game into an APK
-apps/        test apps (hello-xr, hello-js, hello-rtc, gl-bench) and the IWSDK benchmark scenes
+apps/        test apps (hello-xr, hello-js, hello-rtc, hello-intl, hello-mic, hello-storage, hello-sw, gl-bench)
+             and the IWSDK benchmark scenes
 tools/       setup scripts, the builders (pack, mac, win, linux, ios), device, bridge, profile, test, bench
 licenses/    the licence texts of the third-party software the apps contain
 third_party/ downloaded by the setup scripts (gitignored)

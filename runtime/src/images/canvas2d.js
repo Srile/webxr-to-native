@@ -2,11 +2,19 @@
 // the Canvas 2D subset uikit, the MSDF generator and three's texture resizing
 // touch. getContext('webgl2'|'webgl') on the FIRST canvas hands out the host's
 // one GL context through g.__hostCreateWebGLContext (WP-04).
-import { base64Encode, blendPixel, blit, domError, encodePngBytes, flipRows, parseColor } from './pixels.js'
+import { base64Encode, blit, compositePixel, domError, encodePngBytes, flipRows, parseColor } from './pixels.js'
 
 const DEFAULT_W = 300, DEFAULT_H = 150
 
-export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitmap, warnOnce, defer }) {
+function elementStyle(g) {
+  if (typeof g.CSSStyleDeclaration === 'function') return new g.CSSStyleDeclaration()
+  const s = {}
+  s.setProperty = (k, v) => { s[k] = String(v ?? '') }
+  s.removeProperty = (k) => { const v = s[k] ?? ''; delete s[k]; return String(v) }
+  s.getPropertyValue = (k) => s[k] ?? ''
+  return s
+}
+export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitmap, warnOnce, defer, fonts }) {
   let glOwner = null
 
   function toSize(v, fallback) {
@@ -50,6 +58,10 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   // edges are 5 doubles each (x0, y0, x1, y1, winding), crossings an x and a winding per entry.
   let edgeBuf = new Float64Array(5 * 256), xsBuf = new Float64Array(64), wsBuf = new Float64Array(64)
   const gradPx = new Float64Array(4)   // a gradient colour at one pixel
+  // Text scratch (__native.img.textMeasure / textRaster): metrics, a glyph-run coverage mask and its box.
+  const textMetrics = new Float64Array(7), textBox = new Int32Array(4), emBox = new Float64Array(2)
+  let textAlpha = new Uint8Array(64 * 1024)
+  let textNative = null, textFace = null, textSpacing = 0   // set by __textSetup for the call that follows it
   const clampPx = new Uint8ClampedArray(4)   // rounds/clamps a filtered pixel exactly as a Uint8ClampedArray store does
 
   // Source-over of one constant colour (a in 0..255, fractional allowed) over buf[i, end):
@@ -67,6 +79,18 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       buf[i + 2] = Math.round((bs + buf[i + 2] * k) / oa)
       buf[i + 3] = Math.round(oa * 255)
     }
+  }
+  // blendSpan for source-over; copy replaces the span and destination-out punches its alpha (the colour is unused).
+  function paintSpan(buf, i, end, r, gg, b, a, mode) {
+    if (mode === 1) { const aa = a >= 255 ? 255 : a <= 0 ? 0 : Math.round(a); for (; i < end; i += 4) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = aa } return }
+    if (mode === 2) {
+      if (a <= 0) return
+      if (a >= 255) { for (; i < end; i += 4) buf[i + 3] = 0; return }
+      const k = 1 - a / 255
+      for (; i < end; i += 4) buf[i + 3] = Math.round(buf[i + 3] * k)
+      return
+    }
+    blendSpan(buf, i, end, r, gg, b, a)
   }
 
   class CanvasGradient {
@@ -140,13 +164,16 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   }
   // pixels.js blit with the filter (or null) applied per sampled pixel and/or a bottom-up source (a WebGL canvas's
   // readback: source row r lives at srcH - 1 - r); the same sampling, bit for bit.
-  function blitEx(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, dw, dh, alpha, f, bottomUp) {
-    if (!(sw > 0) || !(sh > 0) || dw === 0 || dh === 0 || !(alpha > 0)) return
+  function blitEx(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, dw, dh, alpha, f, bottomUp, clip, mode = 0) {
+    if (!(sw > 0) || !(sh > 0) || dw === 0 || dh === 0 || (!(alpha > 0) && mode !== 1)) return
     let mirrorX = false, mirrorY = false
     if (dw < 0) { dx += dw; dw = -dw; mirrorX = true }
     if (dh < 0) { dy += dh; dh = -dh; mirrorY = true }
-    const x0 = Math.max(0, Math.floor(dx)), x1 = Math.min(dstW, Math.ceil(dx + dw))
-    const y0 = Math.max(0, Math.floor(dy)), y1 = Math.min(dstH, Math.ceil(dy + dh))
+    let x0 = Math.max(0, Math.floor(dx)), x1 = Math.min(dstW, Math.ceil(dx + dw))
+    let y0 = Math.max(0, Math.floor(dy)), y1 = Math.min(dstH, Math.ceil(dy + dh))
+    const mask = clip && clip.kind === 'mask' ? clip : null
+    if (Array.isArray(clip)) { x0 = Math.max(x0, clip[0]); y0 = Math.max(y0, clip[1]); x1 = Math.min(x1, clip[2]); y1 = Math.min(y1, clip[3]) }
+    if (x1 <= x0 || y1 <= y0) return
     for (let py = y0; py < y1; py++) {
       let v = (py + 0.5 - dy) / dh
       if (v < 0 || v >= 1) continue
@@ -155,18 +182,73 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       if (syy < 0 || syy >= srcH) continue
       const row = bottomUp ? srcH - 1 - syy : syy
       for (let px = x0; px < x1; px++) {
+        if (mask && (px < mask.x || py < mask.y || px >= mask.x + mask.w || py >= mask.y + mask.h || !mask.bits[(py - mask.y) * mask.w + (px - mask.x)])) continue
         let u = (px + 0.5 - dx) / dw
         if (u < 0 || u >= 1) continue
         if (mirrorX) u = 1 - u
         const sxx = Math.floor(sx + u * sw)
         if (sxx < 0 || sxx >= srcW) continue
         const si = (row * srcW + sxx) * 4
-        if (f) {
-          filterPixel(f, src, si)
-          blendPixel(dst, (py * dstW + px) * 4, clampPx[0], clampPx[1], clampPx[2], alpha >= 1 ? clampPx[3] : clampPx[3] * alpha)
-        } else blendPixel(dst, (py * dstW + px) * 4, src[si], src[si + 1], src[si + 2], alpha >= 1 ? src[si + 3] : src[si + 3] * alpha)
+        const sa = f ? (filterPixel(f, src, si), alpha >= 1 ? clampPx[3] : clampPx[3] * alpha) : (alpha >= 1 ? src[si + 3] : src[si + 3] * alpha)
+        const rgb = f ? clampPx : src, ri = f ? 0 : si
+        compositePixel(dst, (py * dstW + px) * 4, rgb[ri], rgb[ri + 1], rgb[ri + 2], sa, mode)
       }
     }
+  }
+
+  // Inside spans of a filled path, in device pixels: fn(py, x0, x1) with x1 exclusive. The same coverage fill() paints.
+  function scanFill(path, evenodd, cw, ch, fn) {
+    let total = 0
+    for (let s = 0; s < path.length; s++) total += path[s].length
+    if (!total) return
+    if (edgeBuf.length < total * 5) edgeBuf = new Float64Array(Math.max(total * 5, edgeBuf.length * 2))
+    const edges = edgeBuf
+    let ne = 0, minY = Infinity, maxY = -Infinity
+    for (let s = 0; s < path.length; s++) {
+      const sub = path[s], n = sub.length
+      if (n < 2) continue
+      for (let i = 0; i < n; i++) {
+        const a = sub[i], b = sub[i + 1 < n ? i + 1 : 0]
+        const ay = a[1], by = b[1]
+        if (ay === by) continue
+        const o = ne * 5
+        if (ay < by) { edges[o] = a[0]; edges[o + 1] = ay; edges[o + 2] = b[0]; edges[o + 3] = by; edges[o + 4] = 1 }
+        else { edges[o] = b[0]; edges[o + 1] = by; edges[o + 2] = a[0]; edges[o + 3] = ay; edges[o + 4] = -1 }
+        ne++
+        minY = Math.min(minY, ay, by); maxY = Math.max(maxY, ay, by)
+      }
+    }
+    if (!ne) return
+    const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(ch, Math.ceil(maxY))
+    if (xsBuf.length < ne) { xsBuf = new Float64Array(Math.max(ne, xsBuf.length * 2)); wsBuf = new Float64Array(xsBuf.length) }
+    const xs = xsBuf, ws = wsBuf
+    for (let py = y0; py < y1; py++) {
+      const sy = py + 0.5
+      let nx = 0
+      for (let o = 0, end = ne * 5; o < end; o += 5) {
+        const ey0 = edges[o + 1], ey1 = edges[o + 3]
+        if (!(sy >= ey0 && sy < ey1)) continue
+        const ex0 = edges[o]
+        const x = ex0 + (sy - ey0) * (edges[o + 2] - ex0) / (ey1 - ey0), w = edges[o + 4]
+        let j = nx - 1
+        while (j >= 0 && xs[j] > x) { xs[j + 1] = xs[j]; ws[j + 1] = ws[j]; j-- }
+        xs[j + 1] = x; ws[j + 1] = w; nx++
+      }
+      let wind = 0
+      for (let i = 0; i < nx - 1; i++) {
+        wind += evenodd ? 1 : ws[i]
+        if (!(evenodd ? (wind & 1) === 1 : wind !== 0)) continue
+        const xa = Math.max(0, Math.round(xs[i])), xb = Math.min(cw, Math.round(xs[i + 1]))
+        if (xb > xa) fn(py, xa, xb)
+      }
+    }
+  }
+  function rectsOverlap(list) {
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j]
+      if (a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]) return true
+    }
+    return false
   }
 
   class CanvasRenderingContext2D {
@@ -182,8 +264,10 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       this.__stroke = '#000000'
       this.__alpha = 1
       this.__font = '10px sans-serif'
-      this.globalCompositeOperation = 'source-over'
+      this.__op = 'source-over'
+      this.__clip = null   // null: the whole canvas. {kind:'rects', rects:[[x0,y0,x1,y1]]} or {kind:'mask', x, y, w, h, bits}
       this.textAlign = 'start'; this.textBaseline = 'alphabetic'; this.direction = 'inherit'
+      this.letterSpacing = '0px'; this.wordSpacing = '0px'; this.fontKerning = 'auto'
       this.lineWidth = 1; this.lineCap = 'butt'; this.lineJoin = 'miter'; this.miterLimit = 10
       this.imageSmoothingEnabled = true; this.imageSmoothingQuality = 'low'
       this.shadowBlur = 0; this.shadowColor = 'rgba(0, 0, 0, 0)'; this.shadowOffsetX = 0; this.shadowOffsetY = 0
@@ -207,22 +291,28 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     set globalAlpha(v) { v = Number(v); if (Number.isFinite(v) && v >= 0 && v <= 1) this.__alpha = v }
     get font() { return this.__font }
     set font(v) { if (typeof v === 'string' && v.trim()) this.__font = v }
+    get globalCompositeOperation() { return this.__op }
+    set globalCompositeOperation(v) {
+      if (v === 'source-over' || v === 'copy' || v === 'destination-out') { this.__op = v; return }
+      warnOnce('gco:' + v, `canvas 2d: globalCompositeOperation '${v}' is left unchanged`)
+    }
+    __mode() { return this.__op === 'copy' ? 1 : this.__op === 'destination-out' ? 2 : 0 }
 
     getContextAttributes() { return { alpha: true, colorSpace: 'srgb', desynchronized: false, willReadFrequently: false } }
 
     save() {
       let s = this.__stack[this.__depth]
-      if (!s) this.__stack.push(s = { fill: null, fillRgba: null, fillGrad: null, filter: null, stroke: null, alpha: 0, font: null, op: null, align: null, base: null, lw: 0, smooth: false, tx: 0, ty: 0, sx: 0, sy: 0 })
+      if (!s) this.__stack.push(s = { fill: null, fillRgba: null, fillGrad: null, filter: null, stroke: null, alpha: 0, font: null, op: null, align: null, base: null, spacing: null, lw: 0, smooth: false, tx: 0, ty: 0, sx: 0, sy: 0, clip: null })
       this.__depth++
       s.fill = this.__fill; s.fillRgba = this.__fillRgba; s.fillGrad = this.__fillGrad; s.filter = this.__filter; s.stroke = this.__stroke; s.alpha = this.__alpha; s.font = this.__font
-      s.op = this.globalCompositeOperation; s.align = this.textAlign; s.base = this.textBaseline; s.lw = this.lineWidth; s.smooth = this.imageSmoothingEnabled
+      s.op = this.__op; s.clip = this.__clip; s.align = this.textAlign; s.base = this.textBaseline; s.spacing = this.letterSpacing; s.lw = this.lineWidth; s.smooth = this.imageSmoothingEnabled
       s.tx = this.__tx; s.ty = this.__ty; s.sx = this.__sx; s.sy = this.__sy
     }
     restore() {
       if (this.__depth === 0) return
       const s = this.__stack[--this.__depth]
       this.__fill = s.fill; this.__fillRgba = s.fillRgba; this.__fillGrad = s.fillGrad; this.__filter = s.filter; this.__stroke = s.stroke; this.__alpha = s.alpha; this.__font = s.font
-      this.globalCompositeOperation = s.op; this.textAlign = s.align; this.textBaseline = s.base; this.lineWidth = s.lw; this.imageSmoothingEnabled = s.smooth
+      this.__op = s.op; this.__clip = s.clip; this.textAlign = s.align; this.textBaseline = s.base; this.letterSpacing = s.spacing; this.lineWidth = s.lw; this.imageSmoothingEnabled = s.smooth
       this.__tx = s.tx; this.__ty = s.ty; this.__sx = s.sx; this.__sy = s.sy
       s.fillGrad = null; s.fill = null   // do not keep a gradient alive through a dead record
     }
@@ -255,27 +345,31 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     clearRect(x, y, w, h) {
       const buf = this.canvas.__rgba; if (!buf) return
       if (!this.__rect(x, y, w, h)) return
-      const r = this.__r, x0 = r[0], y0 = r[1], x1 = r[2], y1 = r[3]
-      const cw = this.canvas.__w
-      for (let py = y0; py < y1; py++) buf.fill(0, (py * cw + x0) * 4, (py * cw + x1) * 4)
+      const r = this.__r, cw = this.canvas.__w
+      // clearRect ignores the composite mode and the fill, but it honours the clip: a repaint clears the whole
+      // canvas inside a clip of just the dirty rectangles, and everything outside it has to survive.
+      this.__forClipRect(r[0], r[1], r[2], r[3], (x0, y0, x1, y1) => {
+        for (let py = y0; py < y1; py++) buf.fill(0, (py * cw + x0) * 4, (py * cw + x1) * 4)
+      })
     }
     fillRect(x, y, w, h) {
       const buf = this.canvas.__rgba; if (!buf) return
       if (!this.__rect(x, y, w, h)) return
-      const rr = this.__r, x0 = rr[0], y0 = rr[1], x1 = rr[2], y1 = rr[3]
+      const rr = this.__r
+      this.__forClipRect(rr[0], rr[1], rr[2], rr[3], (x0, y0, x1, y1) => this.__paintRect(buf, x0, y0, x1, y1))
+    }
+    __paintRect(buf, x0, y0, x1, y1) {
       if (this.__fillGrad) { this.__fillGradientSpan(buf, x0, y0, x1, y1); return }
-      const c = this.__fillRgba
-      const a = c[3] * this.__alpha
-      if (a <= 0) return
+      const c = this.__fillRgba, a = c[3] * this.__alpha, mode = this.__mode()
+      if (a <= 0 && mode !== 1) return
       const cw = this.canvas.__w
-      if (a >= 255) {
-        // One row by hand, the others copied from it.
+      if (mode === 0 && a >= 255) {
         const first = (y0 * cw + x0) * 4, end = (y0 * cw + x1) * 4
         blendSpan(buf, first, end, c[0], c[1], c[2], 255)
         for (let py = y0 + 1; py < y1; py++) buf.copyWithin((py * cw + x0) * 4, first, end)
         return
       }
-      for (let py = y0; py < y1; py++) blendSpan(buf, (py * cw + x0) * 4, (py * cw + x1) * 4, c[0], c[1], c[2], a)
+      for (let py = y0; py < y1; py++) paintSpan(buf, (py * cw + x0) * 4, (py * cw + x1) * 4, c[0], c[1], c[2], a, mode)
     }
     strokeRect(x, y, w, h) { const path = this.__path, sub = this.__sub; this.__path = []; this.__sub = null; this.rect(x, y, w, h); this.stroke(); this.__path = path; this.__sub = sub }
 
@@ -353,18 +447,106 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       let flt = this.__filter === 'none' ? null : parseFilter(this.__filter)
       if (flt && !flt.n) flt = null
       const bottomUp = !!image.__rgbaBottomUp
-      if (flt || bottomUp) blitEx(buf, this.canvas.__w, this.canvas.__h, pixels, sw0, sh0, sx, sy, sw, sh, ddx, ddy, ddw, ddh, this.__alpha, flt, bottomUp)
-      else blit(buf, this.canvas.__w, this.canvas.__h, pixels, sw0, sh0, sx, sy, sw, sh, ddx, ddy, ddw, ddh, this.__alpha)
+      const mode = this.__mode(), cw = this.canvas.__w, ch = this.canvas.__h
+      const draw = (clip) => {
+        if (flt || bottomUp) blitEx(buf, cw, ch, pixels, sw0, sh0, sx, sy, sw, sh, ddx, ddy, ddw, ddh, this.__alpha, flt, bottomUp, clip, mode)
+        else blit(buf, cw, ch, pixels, sw0, sh0, sx, sy, sw, sh, ddx, ddy, ddw, ddh, this.__alpha, clip, mode)
+      }
+      const clip = this.__clip
+      if (!clip) draw(null)
+      else if (clip.kind === 'rects') { for (const r of clip.rects) draw(r) }
+      else draw(clip)
     }
 
-    measureText(text) {
-      warnOnce('measureText', 'canvas 2d: measureText() estimates 0.6 em per character; no text shaping on this host')
-      const m = /(\d+(?:\.\d+)?)px/.exec(this.__font)
-      const px = m ? parseFloat(m[1]) : 10
-      const width = 0.6 * px * String(text).length
-      return { width, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width, actualBoundingBoxAscent: 0.8 * px, actualBoundingBoxDescent: 0.2 * px, fontBoundingBoxAscent: 0.8 * px, fontBoundingBoxDescent: 0.2 * px, emHeightAscent: 0.8 * px, emHeightDescent: 0.2 * px, hangingBaseline: 0.8 * px, alphabeticBaseline: 0, ideographicBaseline: -0.2 * px }
+    // Text: glyphs from the host's faces (fonts.js, host/img/text.h), placed with kerning and letterSpacing (px),
+    // no shaping. __textSetup measures `text` in the current font into textMetrics; false when the host has no face.
+    __textSetup(text) {
+      const n = g.__native && g.__native.img
+      if (!fonts || !n || typeof n.textMeasure !== 'function') return false
+      const f = fonts.resolveFont(this.__font)
+      if (f.id < 0) return false
+      textNative = n; textFace = f; textSpacing = parseFloat(this.letterSpacing) || 0
+      n.textMeasure(f.id, f.fallback, f.px, textSpacing, text, textMetrics)
+      return true
     }
-    fillText() { warnOnce('fillText', 'canvas 2d: fillText() draws nothing on this host') }
+    __alignOffset(width) {
+      const a = this.textAlign, rtl = this.direction === 'rtl'
+      if (a === 'center') return -width / 2
+      return a === 'right' || (a === 'end' && !rtl) || (a === 'start' && rtl) ? -width : 0
+    }
+    // The em box from the face's ascent and descent, into emBox (ascent, descent).
+    __emBox(px) {
+      const fa = textMetrics[5], fd = textMetrics[6]
+      emBox[0] = fa + fd > 0 ? px * fa / (fa + fd) : px * 0.8; emBox[1] = px - emBox[0]
+    }
+    // How far below the textBaseline line the alphabetic baseline lies (y grows downwards). After __emBox.
+    __baselineOffset() {
+      const emA = emBox[0], emD = emBox[1]
+      switch (this.textBaseline) {
+        case 'top': return emA
+        case 'hanging': return emA * 0.8
+        case 'middle': return (emA - emD) / 2
+        case 'ideographic': case 'bottom': return -emD
+        default: return 0
+      }
+    }
+    measureText(text) {
+      text = String(text).replace(/[\t\n\f\r]/g, ' ')
+      if (!this.__textSetup(text)) {
+        warnOnce('measureText', 'canvas 2d: measureText() estimates 0.6 em per character; no font on this host')
+        const m = /(\d+(?:\.\d+)?)px/.exec(this.__font)
+        const px = m ? parseFloat(m[1]) : 10
+        const width = 0.6 * px * text.length
+        return { width, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width, actualBoundingBoxAscent: 0.8 * px, actualBoundingBoxDescent: 0.2 * px, fontBoundingBoxAscent: 0.8 * px, fontBoundingBoxDescent: 0.2 * px, emHeightAscent: 0.8 * px, emHeightDescent: 0.2 * px, hangingBaseline: 0.8 * px, alphabeticBaseline: 0, ideographicBaseline: -0.2 * px }
+      }
+      const m = textMetrics, width = m[0]
+      this.__emBox(textFace.px)
+      const off = this.__alignOffset(width), base = this.__baselineOffset(), emA = emBox[0], emD = emBox[1]
+      return {
+        width,
+        actualBoundingBoxLeft: m[1] - off, actualBoundingBoxRight: off + m[2],
+        actualBoundingBoxAscent: m[3] - base, actualBoundingBoxDescent: m[4] + base,
+        fontBoundingBoxAscent: m[5] - base, fontBoundingBoxDescent: m[6] + base,
+        emHeightAscent: emA - base, emHeightDescent: emD + base,
+        hangingBaseline: emA * 0.8 - base, alphabeticBaseline: 0 - base, ideographicBaseline: -emD - base,
+      }
+    }
+    fillText(text, x, y, maxWidth) {
+      const buf = this.canvas.__rgba; if (!buf) return
+      text = String(text).replace(/[\t\n\f\r]/g, ' ')
+      x = Number(x); y = Number(y)
+      if (!text || !Number.isFinite(x) || !Number.isFinite(y)) return
+      if (!this.__textSetup(text)) { warnOnce('fillText', 'canvas 2d: fillText() draws nothing: no font on this host'); return }
+      const width = textMetrics[0]
+      let condense = 1
+      if (maxWidth !== undefined) { maxWidth = Number(maxWidth); if (!(maxWidth > 0)) return; if (width > maxWidth) condense = maxWidth / width }
+      const sx = this.__sx * condense, sy = this.__sy
+      if (!(sx > 0) || !(sy > 0)) { warnOnce('fillText:flip', 'canvas 2d: text under a mirrored or zero scale is not drawn'); return }
+      this.__emBox(textFace.px)
+      const ox = this.__tx + (x + this.__alignOffset(width * condense)) * this.__sx
+      const oy = this.__ty + (y + this.__baselineOffset()) * this.__sy
+      const n = textNative, f = textFace
+      if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, sx, sy, ox, oy, text, textAlpha, textBox)) {
+        const need = textBox[0] * textBox[1]
+        if (need <= textAlpha.length) return   // nothing inked
+        textAlpha = new Uint8Array(Math.max(need, textAlpha.length * 2))
+        if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, sx, sy, ox, oy, text, textAlpha, textBox)) return
+      }
+      const w = textBox[0], h = textBox[1], bx = textBox[2], by = textBox[3]
+      const cw = this.canvas.__w, ch = this.canvas.__h
+      const grad = this.__fillGrad, c = this.__fillRgba, alpha = this.__alpha, mode = this.__mode()
+      if (!grad && c[3] * alpha <= 0 && mode !== 1) return
+      const x0 = Math.max(0, bx), x1 = Math.min(cw, bx + w), y0 = Math.max(0, by), y1 = Math.min(ch, by + h)
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0, ai = (py - by) * w + (x0 - bx), di = (py * cw + x0) * 4; px < x1; px++, ai++, di += 4) {
+          const cov = textAlpha[ai]; if (cov === 0 || !this.__covers(px, py)) continue
+          if (grad) {
+            grad.__colorAt((px + 0.5 - this.__tx) / this.__sx, (py + 0.5 - this.__ty) / this.__sy, gradPx)
+            compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov / 255, mode)
+          } else compositePixel(buf, di, c[0], c[1], c[2], c[3] * alpha * cov / 255, mode)
+        }
+      }
+    }
     strokeText() { warnOnce('strokeText', 'canvas 2d: strokeText() draws nothing on this host') }
 
     // Paths are flattened to polygons in DEVICE space and filled by a non-antialiased scanline pass.
@@ -394,69 +576,37 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     quadraticCurveTo(cx, cy, x, y) { if (!this.__sub) this.moveTo(cx, cy); const [px, py] = this.__sub[this.__sub.length - 1]; const inv = this.__inv(px, py); for (let i = 1; i <= 16; i++) { const t = i / 16, u = 1 - t; this.lineTo(u * u * inv[0] + 2 * u * t * cx + t * t * x, u * u * inv[1] + 2 * u * t * cy + t * t * y) } }
     bezierCurveTo(c1x, c1y, c2x, c2y, x, y) { if (!this.__sub) this.moveTo(c1x, c1y); const [px, py] = this.__sub[this.__sub.length - 1]; const inv = this.__inv(px, py); for (let i = 1; i <= 16; i++) { const t = i / 16, u = 1 - t; this.lineTo(u * u * u * inv[0] + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * x, u * u * u * inv[1] + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * y) } }
     __inv(dx, dy) { return [(dx - this.__tx) / this.__sx, (dy - this.__ty) / this.__sy] }
-    fill(rule) {
+    fill(pathOrRule, rule) {
+      if (pathOrRule && typeof pathOrRule === 'object' && typeof pathOrRule.__toDevice === 'function') {
+        const saved = this.__path
+        this.__path = pathOrRule.__toDevice(this)
+        try { return this.fill(typeof rule === 'string' ? rule : 'nonzero') }
+        finally { this.__path = saved }
+      }
       const buf = this.canvas.__rgba; if (!buf) return
-      if (typeof rule !== 'string') rule = 'nonzero'
+      let ruleName = pathOrRule
+      if (typeof ruleName !== 'string') ruleName = 'nonzero'
       const cw = this.canvas.__w, ch = this.canvas.__h
-      // Edge list over every subpath (each one implicitly closed for filling), into the shared scratch.
-      const path = this.__path
-      let total = 0
-      for (let s = 0; s < path.length; s++) total += path[s].length
-      if (edgeBuf.length < total * 5) edgeBuf = new Float64Array(Math.max(total * 5, edgeBuf.length * 2))
-      const edges = edgeBuf
-      let ne = 0, minY = Infinity, maxY = -Infinity
-      for (let s = 0; s < path.length; s++) {
-        const sub = path[s], n = sub.length
-        if (n < 2) continue
-        for (let i = 0; i < n; i++) {
-          const a = sub[i], b = sub[i + 1 < n ? i + 1 : 0]
-          const ay = a[1], by = b[1]
-          if (ay === by) continue
-          const o = ne * 5
-          if (ay < by) { edges[o] = a[0]; edges[o + 1] = ay; edges[o + 2] = b[0]; edges[o + 3] = by; edges[o + 4] = 1 }
-          else { edges[o] = b[0]; edges[o + 1] = by; edges[o + 2] = a[0]; edges[o + 3] = ay; edges[o + 4] = -1 }
-          ne++
-          minY = Math.min(minY, ay, by); maxY = Math.max(maxY, ay, by)
-        }
-      }
-      if (!ne) return
-      const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(ch, Math.ceil(maxY))
       const solid = this.__fillGrad ? null : this.__fillRgba
-      const alpha = this.__alpha
-      if (solid && solid[3] * alpha <= 0) return
-      const evenodd = rule === 'evenodd'
-      if (xsBuf.length < ne) { xsBuf = new Float64Array(Math.max(ne, xsBuf.length * 2)); wsBuf = new Float64Array(xsBuf.length) }
-      const xs = xsBuf, ws = wsBuf
-      for (let py = y0; py < y1; py++) {
-        const sy = py + 0.5
-        // Crossings at the pixel-centre line, insertion-sorted by x as they come (stable, like Array#sort).
-        let nx = 0
-        for (let o = 0, end = ne * 5; o < end; o += 5) {
-          const ey0 = edges[o + 1], ey1 = edges[o + 3]
-          if (!(sy >= ey0 && sy < ey1)) continue
-          const ex0 = edges[o]
-          const x = ex0 + (sy - ey0) * (edges[o + 2] - ex0) / (ey1 - ey0), w = edges[o + 4]
-          let j = nx - 1
-          while (j >= 0 && xs[j] > x) { xs[j + 1] = xs[j]; ws[j + 1] = ws[j]; j-- }
-          xs[j + 1] = x; ws[j + 1] = w; nx++
-        }
-        if (!nx) continue
-        let wind = 0
-        for (let i = 0; i < nx - 1; i++) {
-          wind += evenodd ? 1 : ws[i]
-          const inside = evenodd ? (wind & 1) === 1 : wind !== 0
-          if (!inside) continue
-          const xa = Math.max(0, Math.round(xs[i])), xb = Math.min(cw, Math.round(xs[i + 1]))
-          if (xb <= xa) continue
-          if (solid) blendSpan(buf, (py * cw + xa) * 4, (py * cw + xb) * 4, solid[0], solid[1], solid[2], solid[3] * alpha)
-          else this.__fillGradientSpan(buf, xa, py, xb, py + 1)
-        }
-      }
+      const alpha = this.__alpha, mode = this.__mode()
+      if (solid && solid[3] * alpha <= 0 && mode !== 1) return
+      scanFill(this.__path, ruleName === 'evenodd', cw, ch, (py, xa, xb) => {
+        this.__clipSpans(py, xa, xb, (a, b) => {
+          if (solid) paintSpan(buf, (py * cw + a) * 4, (py * cw + b) * 4, solid[0], solid[1], solid[2], solid[3] * alpha, mode)
+          else this.__fillGradientSpan(buf, a, py, b, py + 1)
+        })
+      })
     }
     // A stroke is filled as its outline: a quad per segment, a disc at each joint and end for round joins and caps
     // (a square cap extends the end by half the width; miter and bevel joins are drawn as round ones), every polygon
     // wound the same way so the nonzero fill unions them. Dashes are not drawn.
-    stroke() {
+    stroke(pathArg) {
+      if (pathArg && typeof pathArg === 'object' && typeof pathArg.__toDevice === 'function') {
+        const saved = this.__path
+        this.__path = pathArg.__toDevice(this)
+        try { return this.stroke() }
+        finally { this.__path = saved }
+      }
       const c = colour(this.__stroke); if (!c) return
       const hw = Math.max(0.5, this.lineWidth * Math.sqrt(Math.abs(this.__sx * this.__sy)) / 2)
       const round = this.lineJoin === 'round' || this.lineCap === 'round', square = this.lineCap === 'square'
@@ -479,14 +629,113 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       this.__path = polys; this.__fillRgba = c; this.__fillGrad = null
       try { this.fill('nonzero') } finally { this.__path = path; this.__fillRgba = rgba; this.__fillGrad = grad }
     }
-    clip() { warnOnce('clip', 'canvas 2d: clip() is ignored') }
+    // Intersects the clip with the current path (or a Path2D). Rect paths stay a list of rectangles, which is what a
+    // repaint's dirty region is; a rounded rect becomes a coverage mask the size of its own box. The result replaces
+    // the clip and save() keeps the previous one, so the objects are never mutated.
+    clip(pathOrRule, rule) {
+      if (pathOrRule && typeof pathOrRule === 'object' && typeof pathOrRule.__toDevice === 'function') {
+        const saved = this.__path
+        this.__path = pathOrRule.__toDevice(this)
+        try { return this.clip(typeof rule === 'string' ? rule : 'nonzero') }
+        finally { this.__path = saved }
+      }
+      const evenodd = pathOrRule === 'evenodd'
+      const rects = this.__pathRects()
+      if (rects && !rectsOverlap(rects) && (this.__clip === null || this.__clip.kind === 'rects')) {
+        const cw = this.canvas.__w, ch = this.canvas.__h
+        const base = this.__clip ? this.__clip.rects : [[0, 0, cw, ch]]
+        const next = []
+        for (const r of rects) for (const b of base) {
+          const x0 = Math.max(r[0], b[0]), y0 = Math.max(r[1], b[1]), x1 = Math.min(r[2], b[2]), y1 = Math.min(r[3], b[3])
+          if (x1 > x0 && y1 > y0) next.push([x0, y0, x1, y1])
+        }
+        if (!rectsOverlap(next)) { this.__clip = { kind: 'rects', rects: next }; return }
+      }
+      this.__clip = this.__maskClip(this.__path, evenodd)
+    }
+    // The current path as device-pixel rects, or null when a subpath is not an axis-aligned rectangle.
+    __pathRects() {
+      const path = this.__path
+      if (!path.length) return []
+      const cw = this.canvas.__w, ch = this.canvas.__h, rects = []
+      for (const sub of path) {
+        if (sub.length !== 4) return null
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+        for (const p of sub) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]) }
+        for (const p of sub) if ((p[0] !== x0 && p[0] !== x1) || (p[1] !== y0 && p[1] !== y1)) return null
+        const px0 = Math.max(0, Math.round(x0)), py0 = Math.max(0, Math.round(y0))
+        const px1 = Math.min(cw, Math.round(x1)), py1 = Math.min(ch, Math.round(y1))
+        if (px1 > px0 && py1 > py0) rects.push([px0, py0, px1, py1])
+      }
+      return rects
+    }
+    __maskClip(path, evenodd) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const sub of path) for (const p of sub) { minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]); maxX = Math.max(maxX, p[0]); maxY = Math.max(maxY, p[1]) }
+      const cw = this.canvas.__w, ch = this.canvas.__h
+      if (!Number.isFinite(minX)) return { kind: 'rects', rects: [] }
+      const x0 = Math.max(0, Math.floor(minX)), y0 = Math.max(0, Math.floor(minY))
+      const x1 = Math.min(cw, Math.ceil(maxX)), y1 = Math.min(ch, Math.ceil(maxY))
+      if (x1 <= x0 || y1 <= y0) return { kind: 'rects', rects: [] }
+      const w = x1 - x0, h = y1 - y0, bits = new Uint8Array(w * h)
+      scanFill(path, evenodd, cw, ch, (py, xa, xb) => {
+        if (py < y0 || py >= y1) return
+        const row = (py - y0) * w
+        for (let x = Math.max(xa, x0), end = Math.min(xb, x1); x < end; x++) if (this.__covers(x, py)) bits[row + x - x0] = 1
+      })
+      return { kind: 'mask', x: x0, y: y0, w, h, bits }
+    }
+    __covers(x, y) {
+      const c = this.__clip
+      if (!c) return x >= 0 && y >= 0 && x < this.canvas.__w && y < this.canvas.__h
+      if (c.kind === 'rects') { for (const r of c.rects) if (x >= r[0] && x < r[2] && y >= r[1] && y < r[3]) return true; return false }
+      if (x < c.x || y < c.y || x >= c.x + c.w || y >= c.y + c.h) return false
+      return c.bits[(y - c.y) * c.w + (x - c.x)] !== 0
+    }
+    // fn(x0, y0, x1, y1) for each piece of the rect inside the clip. Rect clips stay rectangles; a mask breaks the
+    // rect into spans a row tall.
+    __forClipRect(x0, y0, x1, y1, fn) {
+      const c = this.__clip
+      if (!c) { fn(x0, y0, x1, y1); return }
+      if (c.kind === 'rects') {
+        for (const r of c.rects) {
+          const a = Math.max(x0, r[0]), b = Math.max(y0, r[1]), d = Math.min(x1, r[2]), e = Math.min(y1, r[3])
+          if (d > a && e > b) fn(a, b, d, e)
+        }
+        return
+      }
+      for (let y = y0; y < y1; y++) this.__clipSpans(y, x0, x1, (a, b) => fn(a, y, b, y + 1))
+    }
+    __clipSpans(y, x0, x1, fn) {
+      const c = this.__clip
+      if (!c) { if (x1 > x0) fn(x0, x1); return }
+      if (c.kind === 'rects') {
+        for (const r of c.rects) {
+          if (y < r[1] || y >= r[3]) continue
+          const a = Math.max(x0, r[0]), b = Math.min(x1, r[2])
+          if (b > a) fn(a, b)
+        }
+        return
+      }
+      if (y < c.y || y >= c.y + c.h) return
+      const row = (y - c.y) * c.w
+      const start = Math.max(x0, c.x), end = Math.min(x1, c.x + c.w)
+      let x = start
+      while (x < end) {
+        while (x < end && !c.bits[row + x - c.x]) x++
+        const a = x
+        while (x < end && c.bits[row + x - c.x]) x++
+        if (x > a) fn(a, x)
+      }
+    }
     isPointInPath() { return false }
     // Gradient fill of a device-space span: the colour at each pixel centre, mapped back to user space.
     __fillGradientSpan(buf, x0, y0, x1, y1) {
-      const grad = this.__fillGrad, cw = this.canvas.__w, out = gradPx, alpha = this.__alpha
+      const grad = this.__fillGrad, cw = this.canvas.__w, out = gradPx, alpha = this.__alpha, mode = this.__mode()
       for (let py = y0; py < y1; py++) for (let px = x0; px < x1; px++) {
         grad.__colorAt((px + 0.5 - this.__tx) / this.__sx, (py + 0.5 - this.__ty) / this.__sy, out)
-        const a = out[3] * alpha; if (a > 0) blendPixel(buf, (py * cw + px) * 4, out[0], out[1], out[2], a)
+        const a = out[3] * alpha
+        if (a > 0 || mode === 1) compositePixel(buf, (py * cw + px) * 4, out[0], out[1], out[2], a, mode)
       }
     }
     createLinearGradient(x0, y0, x1, y1) { return new CanvasGradient('linear', [x0, y0, x1, y1].map(Number)) }
@@ -598,13 +847,17 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   class HTMLCanvasElement extends CanvasBase {
     constructor() {
       super(DEFAULT_W, DEFAULT_H)
-      this.style = {}
-      this.dataset = {}
-      this.parentNode = null
-      this.id = ''
-      this.className = ''
+      this.tabIndex = -1  // a browser canvas is focusable once a keyboard driver asks; -1 until then
       this.__attrs = new Map()
       this.__classes = new Set()
+      this._attrs = this.__attrs  // Element's id setter, once this object is an HTMLElement
+      this.childNodes = []
+      this.style = elementStyle(g)  // DOMRoot calls style.removeProperty; a plain object has none
+      this.dataset = {}
+      this.parentNode = null
+      // Own fields, ahead of Element's accessors (those need Element's constructor, which this is not).
+      Object.defineProperty(this, 'id', { value: '', writable: true, configurable: true, enumerable: true })
+      Object.defineProperty(this, 'className', { value: '', writable: true, configurable: true, enumerable: true })
     }
     get tagName() { return 'CANVAS' }
     get nodeName() { return 'CANVAS' }
@@ -655,5 +908,114 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     get [Symbol.toStringTag]() { return 'HTMLCanvasElement' }
   }
 
-  return { HTMLCanvasElement, OffscreenCanvas, CanvasRenderingContext2D }
+  // A browser canvas is an HTMLElement (instanceof, focus, tabIndex). CanvasBase stays an EventTarget so an
+  // OffscreenCanvas is not an element; the element's own methods sit on HTMLCanvasElement.prototype and the
+  // shared canvas methods are linked in under it, ahead of HTMLElement.
+  if (typeof g.HTMLElement === 'function') {
+    const bridge = Object.create(g.HTMLElement.prototype)
+    for (const key of Reflect.ownKeys(CanvasBase.prototype)) {
+      if (key === 'constructor') continue
+      const desc = Object.getOwnPropertyDescriptor(CanvasBase.prototype, key)
+      if (desc) Object.defineProperty(bridge, key, desc)
+    }
+    Object.setPrototypeOf(HTMLCanvasElement.prototype, bridge)
+  }
+
+  // SVG path data, flattened to user-space polygons. The game's UI builds icons with
+  // `new Path2D("M … L … C … Z")` at module load, then fill(path) / stroke(path).
+  class Path2D {
+    constructor(d) { this.__subs = d ? parseSvgPath(d) : [] }
+    addPath(other) { if (other && other.__subs) for (const s of other.__subs) this.__subs.push(s.map(p => p.slice())) }
+    __toDevice(ctx) {
+      return this.__subs.map(sub => {
+        const d = sub.map(([x, y]) => ctx.__pt(x, y))
+        d.closed = !!sub.closed
+        return d
+      })
+    }
+    get [Symbol.toStringTag]() { return 'Path2D' }
+  }
+
+  return { HTMLCanvasElement, OffscreenCanvas, CanvasRenderingContext2D, Path2D }
+}
+
+// Commands the page uses: M/L/H/V/C/Z/A, absolute and relative. Curves and arcs are
+// flattened so the existing scanline fill can draw them.
+function parseSvgPath(d) {
+  const tokens = String(d).match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?/g) || []
+  const subs = []
+  let sub = null, x = 0, y = 0, sx = 0, sy = 0, i = 0
+  const isCmd = (t) => /[A-Za-z]/.test(t)
+  const num = () => parseFloat(tokens[i++])
+  const start = (nx, ny) => { sub = [[nx, ny]]; sub.closed = false; subs.push(sub); x = nx; y = ny; sx = nx; sy = ny }
+  const line = (nx, ny) => { if (!sub) start(nx, ny); else { sub.push([nx, ny]); x = nx; y = ny } }
+  const curve = (c1x, c1y, c2x, c2y, nx, ny) => {
+    if (!sub) start(x, y)
+    const [px, py] = sub[sub.length - 1]
+    for (let k = 1; k <= 16; k++) {
+      const t = k / 16, u = 1 - t
+      sub.push([u * u * u * px + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * nx, u * u * u * py + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * ny])
+    }
+    x = nx; y = ny
+  }
+  const arc = (rx, ry, rot, large, sweep, nx, ny) => {
+    const pts = svgArcPoints(x, y, rx, ry, rot, large, sweep, nx, ny)
+    for (const p of pts) line(p[0], p[1])
+    x = nx; y = ny
+  }
+  while (i < tokens.length) {
+    const cmd = tokens[i++]
+    if (!isCmd(cmd)) break
+    const rel = cmd === cmd.toLowerCase()
+    const op = cmd.toUpperCase()
+    if (op === 'Z') { if (sub && (x !== sx || y !== sy)) line(sx, sy); if (sub) sub.closed = true; sub = null; x = sx; y = sy; continue }
+    while (i < tokens.length && !isCmd(tokens[i])) {
+      if (op === 'M' || op === 'L') {
+        let nx = num(), ny = num(); if (rel) { nx += x; ny += y }
+        if (op === 'M' && sub === null) start(nx, ny); else if (op === 'M') start(nx, ny); else line(nx, ny)
+        // Further pairs after M are lineto.
+        if (op === 'M') while (i < tokens.length && !isCmd(tokens[i])) { let lx = num(), ly = num(); if (rel) { lx += x; ly += y } line(lx, ly) }
+      } else if (op === 'H') { let nx = num(); if (rel) nx += x; line(nx, y) }
+      else if (op === 'V') { let ny = num(); if (rel) ny += y; line(x, ny) }
+      else if (op === 'C') {
+        let c1x = num(), c1y = num(), c2x = num(), c2y = num(), nx = num(), ny = num()
+        if (rel) { c1x += x; c1y += y; c2x += x; c2y += y; nx += x; ny += y }
+        curve(c1x, c1y, c2x, c2y, nx, ny)
+      } else if (op === 'A') {
+        let rx = num(), ry = num(), rot = num(), large = num(), sweep = num(), nx = num(), ny = num()
+        if (rel) { nx += x; ny += y }
+        arc(rx, ry, rot, large, sweep, nx, ny)
+      } else break
+    }
+  }
+  return subs
+}
+
+function svgArcPoints(x1, y1, rx, ry, phiDeg, large, sweep, x2, y2) {
+  rx = Math.abs(rx); ry = Math.abs(ry)
+  if (!(rx > 0) || !(ry > 0)) return [[x2, y2]]
+  const phi = phiDeg * Math.PI / 180, cos = Math.cos(phi), sin = Math.sin(phi)
+  const dx = (x1 - x2) / 2, dy = (y1 - y2) / 2
+  const x1p = cos * dx + sin * dy, y1p = -sin * dx + cos * dy
+  let rx2 = rx * rx, ry2 = ry * ry
+  const lam = x1p * x1p / rx2 + y1p * y1p / ry2
+  if (lam > 1) { const s = Math.sqrt(lam); rx *= s; ry *= s; rx2 = rx * rx; ry2 = ry * ry }
+  const sign = (large === sweep) ? -1 : 1
+  const sq = Math.max(0, (rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p) / (rx2 * y1p * y1p + ry2 * x1p * x1p))
+  const coef = sign * Math.sqrt(sq)
+  const cxp = coef * rx * y1p / ry, cyp = coef * -ry * x1p / rx
+  const cx = cos * cxp - sin * cyp + (x1 + x2) / 2, cy = sin * cxp + cos * cyp + (y1 + y2) / 2
+  const ang = (ux, uy, vx, vy) => { let a = Math.acos(Math.min(1, Math.max(-1, (ux * vx + uy * vy) / (Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1)))); if (ux * vy - uy * vx < 0) a = -a; return a }
+  const theta1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry)
+  let dtheta = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry)
+  if (!sweep && dtheta > 0) dtheta -= 2 * Math.PI
+  if (sweep && dtheta < 0) dtheta += 2 * Math.PI
+  const n = Math.max(8, Math.min(64, Math.ceil(Math.abs(dtheta) * Math.max(rx, ry) * 8)))
+  const pts = []
+  for (let k = 1; k <= n; k++) {
+    const t = theta1 + dtheta * k / n, ex = rx * Math.cos(t), ey = ry * Math.sin(t)
+    pts.push([cx + ex * cos - ey * sin, cy + ex * sin + ey * cos])
+  }
+  pts[pts.length - 1] = [x2, y2]
+  return pts
 }

@@ -88,7 +88,10 @@ runs on the GL thread synchronously, behind whatever was recorded: correct, but 
 makes its thread wait for the GL thread to catch up. The runtime itself avoids that: the swapchain texture's
 per-frame re-attach saves and restores bindings on the GL thread (`glqSaveFb` / `glqRestoreFb`), and the
 framebuffer bindings JS records are tracked in `FB` (`_boundFb`) rather than read back. `glqSaveFb` /
-`glqRestoreFb` exist only with the thread on.
+`glqRestoreFb` exist only with the thread on. The XR layer's per-frame clear (host.json `xr.clearFrame`,
+`webxr/layers.js`) is one hand-written native, `clearFrame(fbo, mask, alpha)`: a queued command whose decoder
+saves masks, scissor and clear values, clears and restores them on the GL thread; inline with the thread off.
+
 
 ## Hand-written entry points
 

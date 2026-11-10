@@ -9,6 +9,16 @@ def hostPhone = project.hasProperty('host.formFactor') && project.property('host
 def hostOrientation = project.hasProperty('host.orientation') ? project.property('host.orientation') : 'landscape'
 // WebSocket + WebRTC data channels in the native library (host.json network.webrtc, WP-21).
 def hostWebrtc = project.hasProperty('host.webrtc') && project.property('host.webrtc') == 'true'
+// Canvas 2D text (stb_truetype) and SVG images (nanosvg) in the native library: host.json web.canvasText / web.svg.
+def hostCanvasText = project.hasProperty('host.canvasText') && project.property('host.canvasText') == 'true'
+def hostSvg = project.hasProperty('host.svg') && project.property('host.svg') == 'true'
+// Microphone capture (host.json media.microphone, WP-25): the native capture (CMake HOST_MICROPHONE) and RECORD_AUDIO
+// (src/microphone/AndroidManifest.xml, merged into whichever manifest the build uses), both only for a game that asks.
+def hostMicrophone = project.hasProperty('host.microphone') && project.property('host.microphone') == 'true'
+// Intl: V8 with ICU (third_party/v8-intl) in the native library (host.json js.intl, WP-24).
+def hostIntl = project.hasProperty('host.intl') && project.property('host.intl') == 'true'
+// IndexedDB + Cache API over SQLite in the native library (host.json storage.indexedDB / storage.cache, WP-26).
+def hostStorage = project.hasProperty('host.storage') && project.property('host.storage') == 'true'
 
 android {
     namespace 'gg.dmnshd.webxrhost'
@@ -22,7 +32,8 @@ android {
         versionName project.property('host.versionName')
         manifestPlaceholders = [appName: hostAppName, osSplash: hostOsSplash, orientation: hostOrientation]
         ndk { abiFilters 'arm64-v8a' }
-        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared', '-DANDROID_PLATFORM=android-29', "-DHOST_PHONE=${hostPhone ? 'ON' : 'OFF'}", "-DHOST_WEBRTC=${hostWebrtc ? 'ON' : 'OFF'}"; cppFlags '' } }
+        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared', '-DANDROID_PLATFORM=android-29', "-DHOST_PHONE=${hostPhone ? 'ON' : 'OFF'}", "-DHOST_WEBRTC=${hostWebrtc ? 'ON' : 'OFF'}", "-DHOST_CANVAS_TEXT=${hostCanvasText ? 'ON' : 'OFF'}", "-DHOST_SVG=${hostSvg ? 'ON' : 'OFF'}", "-DHOST_MICROPHONE=${hostMicrophone ? 'ON' : 'OFF'}", "-DHOST_V8_INTL=${hostIntl ? 'ON' : 'OFF'}", "-DHOST_STORAGE=${hostStorage ? 'ON' : 'OFF'}"; cppFlags '' } }
+
     }
     externalNativeBuild { cmake { path file('../../host/CMakeLists.txt'); version '3.22.1+' } }
     buildTypes {
@@ -33,3 +44,4 @@ android {
     androidResources { noCompress 'glb', 'ktx2', 'ogg', 'opus', 'webm', 'mp3', 'wasm', 'bin', 'js', 'json', 'png', 'ttf', 'txt' }
     sourceSets { main { jniLibs.srcDirs += ['../../third_party/v8/lib', '../../third_party/openxr/lib']; if (!hostPhone && file('../../third_party/ovr_platform_sdk/Android/libs').exists()) jniLibs.srcDirs += ['../../third_party/ovr_platform_sdk/Android/libs']; if (hostPhone) { manifest.srcFile 'src/phone/AndroidManifest.xml'; res.srcDirs += ['src/phone/res'] } } }
 }
+androidComponents { onVariants(selector().all()) { variant -> if (hostMicrophone) variant.sources.manifests.addStaticManifestFile(file('src/microphone/AndroidManifest.xml').absolutePath) } }

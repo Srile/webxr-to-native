@@ -258,21 +258,40 @@ void RealtimeContext::renderThread() {
 
 bool RealtimeContext::issue(const Command& c) {
   if (closed_) return false;
-  if (!hasDevice_ || paused_.load()) {  // no stream, or its unit stopped (pauseOutput): no callback drains the queue, so this thread does, in order
+  // No callback is draining: there is no stream, pauseOutput stopped it, or suspend() stopped it (Howler
+  // auto-suspends after 30 s of silence). Applying here keeps the edits; queueing them would fill the ring and
+  // then sleep this thread on every one (a frame of parameter automation becomes hundreds of milliseconds).
+  if (!hasDevice_ || paused_.load() || !running_.load()) {
     Command q; while (cmds_.pop(q)) graph_->apply(q);
     graph_->apply(c); return true;
   }
   if (cmds_.push(c)) return true;
-  // Full: the callback drains every ~2.7 ms. Wait briefly rather than lose an edit.
-  for (int i = 0; i < 200; i++) { std::this_thread::sleep_for(std::chrono::microseconds(100)); if (cmds_.push(c)) return true; }
+  // A live callback empties the ring within one burst (~4 ms). Waiting longer than that stalls the frame:
+  // Howler and the UI set a parameter per source per frame, and a dead stream never drains, so each
+  // extra command used to sleep 20 ms on this thread (~600 ms a frame).
+  for (int i = 0; i < 8; i++) { std::this_thread::sleep_for(std::chrono::microseconds(500)); if (cmds_.push(c)) return true; }
+#ifdef __ANDROID__
+  // Still full: the callback is not running (AAudio stopped the stream without an error). Keep it out of
+  // the graph, apply the backlog here, then let the next callback render again.
+  running_.store(false);
+  for (int i = 0; i < 2000 && inRender_.load(); i++) std::this_thread::sleep_for(std::chrono::microseconds(50));
+  Command q; while (cmds_.pop(q)) graph_->apply(q);
+  graph_->apply(c);
+  running_.store(true);
+  HOST_LOGW("audio: command queue stalled, applied on the caller");
+  return true;
+#else
   dropped_++; HOST_LOGW("audio: command queue full, dropped op %d", (int)c.op);
   return false;
+#endif
 }
 
 bool RealtimeContext::resume() {
 #ifdef __ANDROID__
   if (!stream_) return false;
   oboe::Result r = stream_->requestStart();
+  // Already started: resume() after a stall recovery, or a second resume(), is not a failure.
+  if (r == oboe::Result::ErrorInvalidState && stream_->getState() == oboe::StreamState::Started) { running_.store(true); return true; }
   if (r != oboe::Result::OK) { HOST_LOGW("audio: requestStart: %s", oboe::convertToText(r)); return false; }
   running_.store(true); return true;
 #elif defined(__APPLE__)
@@ -292,7 +311,11 @@ bool RealtimeContext::resume() {
 bool RealtimeContext::suspend() {
 #ifdef __ANDROID__
   if (!stream_) return false;
-  stream_->requestPause(); running_.store(false); return true;
+  // requestPause is asynchronous: the callback can still be inside the graph. Stop it draining first (issue()
+  // then applies on this thread), wait out a callback that already entered, then pause the stream.
+  running_.store(false);
+  for (int i = 0; i < 2000 && inRender_.load(); i++) std::this_thread::sleep_for(std::chrono::microseconds(50));
+  stream_->requestPause(); return true;
 #elif defined(__APPLE__)
   if (!unit_) return false;
   AudioOutputUnitStop((AudioComponentInstance)unit_); running_.store(false); return true;
@@ -348,8 +371,8 @@ void RealtimeContext::renderInto(float* out, int32_t numFrames) {
 #ifdef __ANDROID__
 oboe::DataCallbackResult RealtimeContext::onAudioReady(oboe::AudioStream* stream, void* audioData, int32_t numFrames) {
   (void)stream;
-  inRender_.store(1);  // before reading paused_ (both seq_cst): pauseOutput either sees this or we see its paused_
-  if (paused_.load()) memset(audioData, 0, (size_t)numFrames * 2 * sizeof(float));  // the stream is stereo float (create())
+  inRender_.store(1);  // before reading paused_/running_ (both seq_cst): suspend/pauseOutput either sees this or we see their flag
+  if (paused_.load() || !running_.load()) memset(audioData, 0, (size_t)numFrames * 2 * sizeof(float));  // the stream is stereo float (create())
   else renderInto((float*)audioData, numFrames);
   inRender_.store(0);
   return oboe::DataCallbackResult::Continue;

@@ -13,6 +13,7 @@ keystore.env
 .DS_Store
 node_modules/
 build-android/
+build-android-*/
 build-mac/
 android/app/.cxx/
 build-mac-host/

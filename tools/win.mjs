@@ -61,6 +61,8 @@ if (app && cfg.app?.icon) {
   catch { console.warn('win.mjs: ImageMagick (magick) not found: the executable gets no icon'); ico = '' }
 }
 if (cfg.network?.webrtc === true) console.warn('win: WebSocket and WebRTC (host.json network.webrtc) are not built for Windows yet; the page gets neither')
+if (cfg.media?.microphone === true) console.warn('win: microphone capture (host.json media.microphone) is not built for Windows; the page has no navigator.mediaDevices')
+if (cfg.storage?.indexedDB === true || cfg.storage?.cache === true) console.warn('win: IndexedDB and the Cache API (host.json storage) are not built for Windows yet; the page gets neither')
 if (!existsSync(join(build, 'build.ninja')))
   run('cmake', ['-S', 'host', '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', `-DHOST_WIN_CONSOLE=${app ? 'OFF' : 'ON'}`, `-DHOST_WIN_ICON=${ico.replace(/\\/g, '/')}`,
     ...(cross ? [`-DCMAKE_TOOLCHAIN_FILE=${join(root, 'tools/win-cross.cmake')}`] : [])])

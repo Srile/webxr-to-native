@@ -4,6 +4,14 @@
 //     decoded on a worker thread; the callback runs on the host loop.
 //   encodePng(width, height, rgba): ArrayBuffer   — synchronous
 //   resize(rgba, w, h, nw, nh): ArrayBuffer       — bilinear, synchronous
+// Only with host.json web.canvasText in a build with HOST_HAS_CANVAS_TEXT (img/text.cpp; CMake HOST_CANVAS_TEXT):
+//   fontLoad(bytes): id                            — TrueType/OpenType bytes (copied); throws when unreadable
+//   fontSystem(): id | -1                          — the platform's sans-serif face
+//   textMeasure(font, fallback, px, spacing, text, out: Float64Array(7))
+//     out = width, ink left, ink right, ink ascent, ink descent, font ascent, font descent (CSS px)
+//   textRaster(font, fallback, px, spacing, scaleX, scaleY, ox, oy, text, alpha: Uint8Array, out: Int32Array(4)): bool
+//     coverage into alpha, out = w, h, x0, y0 (device px); false with out set when alpha is too small or nothing inks
+// decode takes SVG only with host.json web.svg in a build with HOST_HAS_SVG (nanosvg; CMake HOST_SVG).
 // Result buffers are handed to V8 by backing store, no copy.
 #include <cstring>
 #include <memory>
@@ -13,6 +21,9 @@
 
 #include "core/log.h"
 #include "img/decode.h"
+#ifdef HOST_HAS_CANVAS_TEXT
+#include "img/text.h"
+#endif
 #include "js/bind.h"
 #include "js/engine.h"
 #include "js/natives.h"
@@ -20,6 +31,15 @@
 namespace host {
 
 namespace {
+
+bool g_svg = false;  // host.json web.svg (set by installImages)
+
+// The decode as the game's host.json allows it: SVG bytes are refused when web.svg is off, so a game that did not
+// ask for it behaves the same in an APK built without nanosvg and on a desktop host built with it.
+img::Image decodeAllowed(const uint8_t* bytes, size_t len) {
+  if (!g_svg && img::isSvg(bytes, len)) { img::Image out; out.error = "unsupported image format (SVG images are off: host.json web.svg)"; return out; }
+  return img::decode(bytes, len);
+}
 
 // Moves a byte vector into an ArrayBuffer without copying; V8 frees it. With V8's sandbox (the Windows prebuilt)
 // an ArrayBuffer cannot alias memory outside it: there the pixels are copied in, once per decode.
@@ -87,12 +107,12 @@ void Decode(const v8::FunctionCallbackInfo<v8::Value>& a) {
   job->in.assign(b.data, b.data + b.len);
   Loop* loop = svc ? svc->loop : nullptr;
   if (!loop) {  // no loop to post to (tests): decode and deliver inline
-    job->out = img::decode(job->in.data(), job->in.size());
+    job->out = decodeAllowed(job->in.data(), job->in.size());
     deliver(job);
     return;
   }
   std::thread([job, loop] {
-    job->out = img::decode(job->in.data(), job->in.size());
+    job->out = decodeAllowed(job->in.data(), job->in.size());
     std::vector<uint8_t>().swap(job->in);
     loop->post([job] { deliver(job); });
   }).detach();
@@ -122,6 +142,56 @@ void Resize(const v8::FunctionCallbackInfo<v8::Value>& a) {
   a.GetReturnValue().Set(wrapBytes(iso, std::move(out)));
 }
 
+#ifdef HOST_HAS_CANVAS_TEXT
+void FontLoad(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate();
+  bind::Bytes b = a.Length() > 0 ? bind::bytes(a[0]) : bind::Bytes{};
+  if (!b.ok) { bind::throwType(iso, "img.fontLoad: bytes must be an ArrayBuffer or a view"); return; }
+  std::string err;
+  int id = img::fontLoad(b.data, b.len, err);
+  if (id < 0) { bind::throwError(iso, "img.fontLoad: " + err); return; }
+  a.GetReturnValue().Set(id);
+}
+
+void FontSystem(const v8::FunctionCallbackInfo<v8::Value>& a) { a.GetReturnValue().Set(img::fontSystem()); }
+
+// The text argument as UTF-16, into a reused buffer.
+std::vector<uint16_t> g_text;
+bool textArg(const v8::FunctionCallbackInfo<v8::Value>& a, int i) {
+  if (i >= a.Length() || !a[i]->IsString()) return false;
+  v8::Local<v8::String> s = a[i].As<v8::String>();
+  const uint32_t n = (uint32_t)s->Length();
+  g_text.resize(n);
+  if (n) s->WriteV2(a.GetIsolate(), 0, n, g_text.data());
+  return true;
+}
+
+void TextMeasure(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate();
+  if (!textArg(a, 4)) { bind::throwType(iso, "img.textMeasure: text must be a string"); return; }
+  bind::Bytes out = a.Length() > 5 && a[5]->IsFloat64Array() ? bind::bytes(a[5]) : bind::Bytes{};
+  if (!out.ok || out.len < 7 * sizeof(double)) { bind::throwType(iso, "img.textMeasure: out must be a Float64Array of 7"); return; }
+  img::TextMetrics m;
+  img::textMeasure(bind::i32(a, 0, -1), bind::i32(a, 1, -1), (float)bind::num(a, 2), (float)bind::num(a, 3), g_text.data(), g_text.size(), m);
+  const double v[7] = {m.width, m.left, m.right, m.ascent, m.descent, m.fontAscent, m.fontDescent};
+  memcpy(out.data, v, sizeof v);
+}
+
+void TextRaster(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate();
+  if (!textArg(a, 8)) { bind::throwType(iso, "img.textRaster: text must be a string"); return; }
+  bind::Bytes alpha = a.Length() > 9 && a[9]->IsUint8Array() ? bind::bytes(a[9]) : bind::Bytes{};
+  bind::Bytes out = a.Length() > 10 && a[10]->IsInt32Array() ? bind::bytes(a[10]) : bind::Bytes{};
+  if (!alpha.ok || !out.ok || out.len < 4 * sizeof(int32_t)) { bind::throwType(iso, "img.textRaster: alpha must be a Uint8Array and out an Int32Array of 4"); return; }
+  int w = 0, h = 0, x0 = 0, y0 = 0;
+  bool ok = img::textRaster(bind::i32(a, 0, -1), bind::i32(a, 1, -1), (float)bind::num(a, 2), (float)bind::num(a, 3), (float)bind::num(a, 4, 1), (float)bind::num(a, 5, 1),
+                            (float)bind::num(a, 6), (float)bind::num(a, 7), g_text.data(), g_text.size(), alpha.data, alpha.len, w, h, x0, y0);
+  const int32_t v[4] = {w, h, x0, y0};
+  memcpy(out.data, v, sizeof v);
+  a.GetReturnValue().Set(ok);
+}
+#endif  // HOST_HAS_CANVAS_TEXT
+
 }  // namespace
 
 void installImages(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc) {
@@ -131,6 +201,20 @@ void installImages(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Hos
   bind::fn(ctx, img, "decode", Decode, data);
   bind::fn(ctx, img, "encodePng", EncodePng);
   bind::fn(ctx, img, "resize", Resize);
+  static const Json none;
+  const Json& web = svc.config ? svc.config->at("web") : none;
+
+  g_svg = web.bo("svg", false);
+#ifdef HOST_HAS_CANVAS_TEXT
+  // Absent, the runtime measures text by estimate and draws none, as before (runtime/src/images/canvas2d.js).
+  if (web.bo("canvasText", false)) {
+    bind::fn(ctx, img, "fontLoad", FontLoad);
+    bind::fn(ctx, img, "fontSystem", FontSystem);
+    bind::fn(ctx, img, "textMeasure", TextMeasure);
+    bind::fn(ctx, img, "textRaster", TextRaster);
+  }
+#endif
+
 }
 
 }  // namespace host

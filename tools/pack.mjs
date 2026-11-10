@@ -7,7 +7,7 @@ import { execSync, execFileSync, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve, basename, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gameArg, ensureWebrtcSources } from './game.mjs'
+import { gameArg, ensureWebrtcSources, ensureV8Intl, ensureStorageSources, wantsStorage } from './game.mjs'
 import { rewriteFile } from './unicode-regex.mjs'
 import { appVersion } from './app-version.mjs'
 import { notices } from './notices.mjs'
@@ -30,6 +30,16 @@ const phone = flag('--phone') || cfg.android?.formFactor === 'phone'
 // WebSocket + WebRTC data channels (WP-21): only built into a game that asks for them; the sources come on demand.
 const webrtc = cfg.network?.webrtc === true
 if (webrtc && !opt('--stage')) ensureWebrtcSources(cfg)
+// Canvas 2D text (stb_truetype) and SVG images (nanosvg): native code only the games that ask carry (host/CMakeLists.txt
+// HOST_CANVAS_TEXT / HOST_SVG); the runtime estimates text and refuses SVG without them, as it did before.
+const canvasText = cfg.web?.canvasText === true, svg = cfg.web?.svg === true
+// Microphone capture (WP-25): host.json media.microphone; the capture code and RECORD_AUDIO only then.
+const microphone = cfg.media?.microphone === true
+// Intl (WP-24): js.intl links V8 with ICU (third_party/v8-intl) in place of the stock Android V8, which has none.
+const intl = opt('--stage') ? cfg.js?.intl === true : ensureV8Intl(cfg)
+// IndexedDB + Cache API over SQLite (WP-26): only built into a game whose host.json storage asks for either.
+const storage = wantsStorage(cfg)
+if (storage && !opt('--stage')) ensureStorageSources(cfg)
 // app.orientation: landscape, portrait, or any (follows the phone, respecting its rotation lock).
 const orientation = { landscape: 'userLandscape', portrait: 'userPortrait', any: 'fullUser' }[app.orientation ?? 'landscape'] ?? 'userLandscape'
 
@@ -38,6 +48,17 @@ const stageOnly = opt('--stage')
 const env = { ...process.env }
 if (!stageOnly) for (const kv of execFileSync('bash', ['-c', 'source "$1" && env -0', '_', join(root, 'tools/env.sh')], { encoding: 'utf8' }).split('\0')) {
   const i = kv.indexOf('='); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1)
+}
+// Git bash reports toolchain paths as /c/Users/... . Gradle and the JDK on Windows need drive paths,
+// and the Windows PATH must stay semicolon-separated.
+if (process.platform === 'win32') {
+  const msysToWin = (p) => { const m = /^\/([A-Za-z])\/(.*)$/.exec(p); return m ? `${m[1].toUpperCase()}:\\${m[2].replace(/\//g, '\\')}` : p }
+  for (const k of Object.keys(env)) {
+    if (k === 'PATH' || k === 'Path') continue
+    if (typeof env[k] === 'string' && /^\/[A-Za-z]\//.test(env[k])) env[k] = msysToWin(env[k])
+  }
+  const prepend = [env.JAVA_HOME && join(env.JAVA_HOME, 'bin'), env.ANDROID_HOME && join(env.ANDROID_HOME, 'platform-tools')].filter(Boolean)
+  env.PATH = env.Path = [...prepend, process.env.PATH || process.env.Path || ''].filter(Boolean).join(';')
 }
 
 // 1. stage assets
@@ -74,6 +95,9 @@ if (webDist) {
   const entry = html.match(/<script[^>]+type="module"[^>]+src="([^"]+)"/)?.[1] ?? html.match(/__bootLoad\(["']([^"']+)["']\)/)?.[1]
   if (!entry) { console.error('index.html has no module entry'); process.exit(2) }
   const elements = pageElements(html)
+  // web.inlineScripts: true runs index.html's classic inline scripts before the entry (runtime/src/boot.js); the
+  // manifest carries their text. Off, a page's inline startup code is skipped, as it always was.
+  const inlineScripts = cfg.web.inlineScripts === true ? classicInlineScripts(html) : undefined
   const title = html.match(/<title>([^<]*)<\/title>/)?.[1]?.trim() ?? name
   // web.inject: the game's own boot scripts, paths relative to host.json (its native/ folder), imported as modules
   // before the entry (runtime/src/boot.js): where a page needs a choice made that its HTML UI, which no host draws,
@@ -86,12 +110,13 @@ if (webDist) {
     mkdirSync(join(assets, 'www', 'webxr-host-inject'), { recursive: true }); cpSync(src, join(assets, 'www', rel))
     return rel
   })
-  manifest.web = { ...cfg.web, entry: entry.replace(/^\.?\//, ''), preload: [...html.matchAll(/rel="modulepreload"[^>]+href="([^"]+)"/g)].map(m => m[1].replace(/^\.?\//, '')), elements, title, inject }
+  manifest.web = { ...cfg.web, entry: entry.replace(/^\.?\//, ''), preload: [...html.matchAll(/rel="modulepreload"[^>]+href="([^"]+)"/g)].map(m => m[1].replace(/^\.?\//, '')), elements, inlineScripts, title, inject }
   if (inject.length) console.log(`web.inject: ${inject.join(', ')}`)
+  if (inlineScripts) console.log(`web.inlineScripts: ${inlineScripts.length} classic inline script(s) from index.html`)
   console.log(`web: ${dist} entry=${manifest.web.entry}`)
-  // The APK's V8 (14.9, no ICU) rejects Unicode property escapes: spell them out (tools/unicode-regex.mjs). The
-  // desktop and Apple hosts' V8s have ICU and get the page as it is.
-  if (!stageOnly) {
+  // The APK's stock V8 (14.9, no ICU) rejects Unicode property escapes: spell them out (tools/unicode-regex.mjs). With
+  // js.intl it has ICU, as the desktop and Apple hosts' V8s do, and gets the page as it is.
+  if (!stageOnly && !intl) {
     let files = 0, escapes = 0
     const walkJs = (d) => { for (const e of readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) walkJs(p); else if (/\.m?js$/.test(e.name)) { const n = rewriteFile(p); if (n) { files++; escapes += n } } } }
     walkJs(join(assets, 'www'))
@@ -99,20 +124,25 @@ if (webDist) {
   }
 }
 // The prelude is rebuilt here so an edit under runtime/src can never ship stale (it did once: the APK carried a
-// bundle from before the AR work and reported no immersive-ar while native had it).
-execSync('node runtime/build.mjs', { cwd: root, stdio: 'inherit' })
+// bundle from before the AR work and reported no immersive-ar while native had it). A release ships it minified
+// without its source map (runtime/build.mjs --min: 0.4 MB instead of 2.6 MB); a debug build keeps the readable
+// bundle and the inline map, which the inspector shows as runtime/src.
+execSync(`node runtime/build.mjs${release ? ' --min' : ''}`, { cwd: root, stdio: 'inherit' })
 const runtime = join(root, 'runtime/dist/host-runtime.js')
 if (existsSync(runtime)) cpSync(runtime, join(assets, 'host-runtime.js'))
 const workerRt = join(root, 'runtime/dist/host-worker.js'); if (existsSync(workerRt)) cpSync(workerRt, join(assets, 'host-worker.js'))
+console.log(`runtime: ${(statSync(join(assets, 'host-runtime.js')).size / 1e6).toFixed(2)} MB${release ? ' (minified)' : ''}`)
+// The service-worker prelude (WP-27) only for a game that turns service workers on (host.json web.serviceWorker).
+if (cfg.web?.serviceWorker === true) cpSync(join(root, 'runtime/dist/host-sw.js'), join(assets, 'host-sw.js'))
 const snapshot = join(root, 'third_party/v8/snapshot_blob.bin')
-// The APK's V8 10.0 snapshot; the desktop host's V8 has its own built in.
-if (existsSync(snapshot) && !stageOnly) cpSync(snapshot, join(assets, 'snapshot_blob.bin'))
+// The APK's V8 10.0 snapshot; the desktop host's V8 has its own built in (as the js.intl monolith does: never another's).
+if (existsSync(snapshot) && !stageOnly && !intl) cpSync(snapshot, join(assets, 'snapshot_blob.bin'))
 writeFileSync(join(assets, 'host.json'), JSON.stringify(manifest, null, 2))
 // 2a. the licences of the third-party code this build contains (tools/notices.mjs, licenses/): every app built
 // from the toolkit carries them. --host names the desktop or Apple host a stage is for (the builders pass it).
 const noticeHost = stageOnly ? (opt('--host') ?? 'desktop') : (phone ? 'phone' : 'quest')
 const platformSdk = !stageOnly && !phone && existsSync(join(root, 'third_party/ovr_platform_sdk/Include/OVR_Platform.h'))
-writeFileSync(join(assets, 'THIRD_PARTY_NOTICES.txt'), notices(root, noticeHost, { webrtc, platformSdk }))
+writeFileSync(join(assets, 'THIRD_PARTY_NOTICES.txt'), notices(root, noticeHost, { webrtc, svg, storage, intl, platformSdk }))
 let bytes = 0; const walk = d => { for (const e of readdirSync(d, { withFileTypes: true })) e.isDirectory() ? walk(join(d, e.name)) : bytes += statSync(join(d, e.name)).size }; walk(assets)
 console.log(`assets: ${(bytes / 1e6).toFixed(1)} MB`)
 // 2b. OS splash: Quest shows assets/vr_splash.png (with com.oculus.ossplash in the manifest) from launch until
@@ -142,11 +172,14 @@ if (app.icon) {
 // 3. gradle
 const task = release ? 'assembleRelease' : 'assembleDebug'
 const versionCode = app.versionCode ?? Math.floor(Date.now() / 60000) % 2000000000
-const gradleArgs = [task, `-Phost.package=${pkg}`, `-Phost.appName=${name}`, `-Phost.versionCode=${versionCode}`, `-Phost.versionName=${appVersion(cfg, cfgPath)}`, `-Phost.osSplash=${osSplash}`, `-Phost.formFactor=${phone ? 'phone' : 'quest'}`, `-Phost.orientation=${orientation}`, `-Phost.webrtc=${webrtc}`, '--console=plain', '-q']
-const gradle = existsSync(join(root, 'android/gradlew')) ? join(root, 'android/gradlew') : join(env.ANDROID_HOME ? dirname(dirname(env.ANDROID_HOME)) : root, 'sdk/gradle-8.9/bin/gradle')
-if (!existsSync(join(root, 'android/local.properties'))) writeFileSync(join(root, 'android/local.properties'), `sdk.dir=${env.ANDROID_HOME}\n`)
-console.log(`gradle ${task} package=${pkg}${phone ? ' (phone)' : ''}${webrtc ? ' +webrtc' : ''}`)
-const r = spawnSync(gradle, gradleArgs, { cwd: join(root, 'android'), env, stdio: 'inherit' })
+const gradleArgs = [task, `-Phost.package=${pkg}`, `-Phost.appName=${name}`, `-Phost.versionCode=${versionCode}`, `-Phost.versionName=${appVersion(cfg, cfgPath)}`, `-Phost.osSplash=${osSplash}`, `-Phost.formFactor=${phone ? 'phone' : 'quest'}`, `-Phost.orientation=${orientation}`, `-Phost.webrtc=${webrtc}`, `-Phost.canvasText=${canvasText}`, `-Phost.svg=${svg}`, `-Phost.microphone=${microphone}`, `-Phost.intl=${intl}`, `-Phost.storage=${storage}`, '--console=plain', '-q']
+const gradleBat = join(root, 'android/gradlew.bat')
+const gradle = process.platform === 'win32' && existsSync(gradleBat) ? gradleBat : existsSync(join(root, 'android/gradlew')) ? join(root, 'android/gradlew') : join(env.ANDROID_HOME ? dirname(dirname(env.ANDROID_HOME)) : root, 'sdk/gradle-8.9/bin/gradle')
+if (!existsSync(join(root, 'android/local.properties'))) writeFileSync(join(root, 'android/local.properties'), `sdk.dir=${(env.ANDROID_HOME ?? '').replace(/\\/g, '/')}\n`)
+console.log(`gradle ${task} package=${pkg}${phone ? ' (phone)' : ''}${webrtc ? ' +webrtc' : ''}${canvasText ? ' +canvasText' : ''}${svg ? ' +svg' : ''}${microphone ? ' +microphone' : ''}${intl ? ' +intl' : ''}${storage ? ' +storage' : ''}`)
+// gradlew.bat is the Windows entry. cmd splits on spaces, so quote those args (the app name).
+const gradleCmd = process.platform === 'win32' ? gradleArgs.map(a => /[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a) : gradleArgs
+const r = spawnSync(gradle, gradleCmd, { cwd: join(root, 'android'), env, stdio: 'inherit', shell: process.platform === 'win32' })
 if (r.status !== 0) process.exit(r.status ?? 1)
 let apk = join(root, 'android/app/build/outputs/apk', release ? 'release' : 'debug', release ? 'app-release.apk' : 'app-debug.apk')
 if (release && !existsSync(apk)) apk = apk.replace('app-release.apk', 'app-release-unsigned.apk')
@@ -179,7 +212,25 @@ if (flag('--run')) execFileSync('node', [dev, 'run', pkg], { stdio: 'inherit', e
 // containers, canvases and overlays finds them (runtime/src/dom-lite). Script and style bodies are skipped.
 // The body's element tree, for dom-lite to build as stubs (no layout, no paint: the page's HTML UI stays invisible, but
 // every element a script looks up exists, by id, class, tag or a descendant selector). Each: tag, id, class, the
-// index of its parent element (-1: the body) and its other attributes (style left out). Text and scripts are not kept.
+// index of its parent element (-1: the body) and its other attributes (style left out). Text and scripts are not kept
+// as elements. Classic inline scripts (no src, not a module, an import map or a nomodule script, which a browser
+// that runs modules never executes) are kept and run before the entry when host.json web.inlineScripts is true:
+// the host never parses the document, so a page's own startup — the VR button click the host cannot draw — would
+// otherwise never run.
+function classicInlineScripts(html) {
+  const out = []
+  for (const m of html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi)) {
+    const attrs = m[1] || ''
+    if (/\ssrc\s*=/i.test(attrs)) continue
+    if (/\snomodule(\s|=|$)/i.test(attrs)) continue
+
+    const type = attrs.match(/\stype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i)
+    const t = (type?.[1] ?? type?.[2] ?? type?.[3] ?? '').toLowerCase()
+    if (t && t !== 'text/javascript' && t !== 'application/javascript' && t !== 'text/ecmascript') continue
+    if (m[2].trim()) out.push(m[2])
+  }
+  return out
+}
 function pageElements(html) {
   const body = html.slice(Math.max(0, html.search(/<body[\s>]/i)))
   const VOID = new Set(['img', 'br', 'hr', 'input', 'meta', 'link', 'source', 'area', 'base', 'col', 'embed', 'track', 'wbr'])

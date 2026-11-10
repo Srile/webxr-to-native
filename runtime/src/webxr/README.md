@@ -64,11 +64,21 @@ Steady frames allocate nothing on the host side; IWER's host path allocates abou
   Features: `viewer`, `local`, `local-floor`, `bounded-floor`, `layers`, `hand-tracking`, the three foveation
   levels, and `plane-detection` / `mesh-detection` in `immersive-ar` with `caps().scene`. A required feature
   outside that rejects with `NotSupportedError`; an optional one is dropped with a log line. A second session
-  while one runs rejects with `InvalidStateError`. `supportsSession` is the pre-1.0 shape.
+  while one runs (or is held, below) rejects with `InvalidStateError`. `supportsSession` is the pre-1.0 shape.
+- A request made before the runtime's session has begun (`__native.xr.state()` neither running nor visible: the
+  headset off at launch, IDLE, where xrWaitFrame never runs) is held and opened on the `'state'` event that says
+  it has; the host publishes those while the page is still flat (`app/host.cpp publishXrState`). Resolving earlier
+  put the page on XR rAF with no frames. A session opened while the runtime is READY or SYNCHRONIZED starts
+  `hidden` (a `visibilitychange` host event at `started`): those frames carry no valid views, and a page that places
+  its scene from its first frame kept garbage (a game's menu stayed black). VISIBLE / FOCUSED turns it visible.
 - `XRWebGLLayer` (a subclass of IWER's): the swapchain is asked for sRGB where GL has
   `EXT_sRGB_write_control`, and IWER's layer target is replaced by `layer-target.js` (4x
   `EXT_multisampled_render_to_texture`, the sRGB raw framebuffer, the host's depth texture, one viewport for one
-  view). Wonderland Engine draws text with alpha-to-coverage into this framebuffer.
+  view). Wonderland Engine draws text with alpha-to-coverage into this framebuffer. With host.json
+  `xr.clearFrame` the target clears colour (transparent black for an alpha layer), depth and stencil before each
+  frame's callbacks through the host's `clearFrame` GL op (`host/gl/webgl_bind.cpp`): one queued command, no state
+  read back on the JS thread. Off by default: most engines clear on their own; Wonderland's opaque passes do not.
+
 - `XRWebGLBinding` (a subclass of IWER's `XRHostWebGLBinding`): a `'texture'` projection layer gets the host's
   depth texture as `depthStencilTexture` (vision) and, with one view, one sub-image over the whole image.
 - `XRSession.prototype.initiateRoomCapture` (Meta's room setup) → `__native.xr.requestSceneCapture()`, resolved

@@ -1,4 +1,4 @@
-ICU, International Components for Unicode, as built with V8 (its icudtl.dat on macOS, Windows, Linux, iOS, visionOS)
+ICU, International Components for Unicode, as built with V8 (its icudtl.dat on macOS, Windows, Linux, iOS, visionOS; compiled into the Android V8 of games with host.json js.intl)
 https://icu.unicode.org
 Licence: Unicode-3.0 (and the third-party notices in it)
 

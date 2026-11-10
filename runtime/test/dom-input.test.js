@@ -95,6 +95,13 @@ test('touch controls follow the page\'s own touch UI (showWhen)', () => {
   g.document.body.style.display = ''; c.remove(); g.__hostControlsTick(); assert.deepEqual(shown, [false, true, false])
 })
 
+test('style.setProperty on a fresh element sets the property', () => {
+  const { g } = sandbox({ formFactor: 'phone' })
+  const el = g.document.createElement('div')
+  el.style.setProperty('display', 'none', 'important')
+  assert.equal(el.style.display, 'none'); assert.equal(el.style.getPropertyValue('display'), 'none')
+})
+
 test('safe-area insets reach getComputedStyle through env()', () => {
   const { g } = sandbox({ formFactor: 'phone' })
   g.__hostSetViewport(915, 412, 2.625, 2400, 1080, 90, 0, 0, 0, 52)
@@ -112,6 +119,23 @@ test('DOMParser parses SVG into elements SVGLoader can walk', () => {
   const path = svg.getElementsByTagName('path')[0]
   assert.equal(path.nodeName, 'path'); assert.equal(path.getAttribute('d'), 'M1 1 L 2 2'); assert.equal(path.style.fillRule, 'evenodd'); assert.equal(path.parentNode.nodeName, 'g')
   assert.equal(svg.childNodes.length, 2); assert.equal(svg.lastChild.textContent, 'a & b')
+  assert.equal(path.namespaceURI, 'http://www.w3.org/2000/svg')
+})
+
+test('DOMParser keeps XML namespaces a UI tree looks up', () => {
+  const { g } = sandbox()
+  const xml = '<?xml version="1.0"?><ui-tree name="default" xmlns="lazy-widgets" xmlns:option="lazy-widgets:options" xmlns:on="lazy-widgets:on"><layered-container><book option:id="mode-book" on:click="$go">Hi</book></layered-container></ui-tree>'
+  const d = new g.DOMParser().parseFromString(xml, 'text/xml')
+  const trees = d.getElementsByTagNameNS('lazy-widgets', 'ui-tree')
+  assert.equal(trees.length, 1)
+  assert.equal(trees[0].attributes.getNamedItemNS(null, 'name').value, 'default')
+  assert.equal([...trees[0].attributes].find(a => a.name === 'xmlns').namespaceURI, 'http://www.w3.org/2000/xmlns/')
+  const book = trees[0].getElementsByTagNameNS('lazy-widgets', 'book')[0]
+  assert.equal(book.namespaceURI, 'lazy-widgets'); assert.equal(book.localName, 'book'); assert.equal(book.textContent, 'Hi')
+  const attrs = [...book.attributes]
+  assert.equal(attrs.find(a => a.localName === 'id').namespaceURI, 'lazy-widgets:options')
+  assert.equal(attrs.find(a => a.localName === 'click').namespaceURI, 'lazy-widgets:on')
+  assert.equal(g.Node.ELEMENT_NODE, 1); assert.equal(book.nodeType, g.Node.ELEMENT_NODE)
 })
 
 test('a touch in a touch zone goes to the page\'s zone element while it is shown; elsewhere to the canvas', () => {

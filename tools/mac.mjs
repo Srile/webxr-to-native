@@ -11,7 +11,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gameArg, webrtcSwitch } from './game.mjs'
+import { gameArg, webrtcSwitch, microphoneSwitch, storageSwitch } from './game.mjs'
 import { appVersion } from './app-version.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -32,7 +32,11 @@ const assets = join(build, pkg, 'assets'), files = join(build, pkg, 'files')
 run('node', [join(root, 'tools/pack.mjs'), cfgPath, '--stage', assets, '--host', 'mac'])
 // WebSocket + WebRTC data channels only for a game that asks (host.json network.webrtc, WP-21; tools/game.mjs).
 const webrtc = webrtcSwitch(cfg, build)
-if (!existsSync(join(build, 'build.ninja')) || webrtc.stale) run('cmake', ['-S', 'host', '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', webrtc.define])
+// Microphone capture only for a game that asks (host.json media.microphone, WP-25). Unbundled, macOS asks the
+// terminal app this runs from for the microphone; an --app bundle asks in its own name (NSMicrophoneUsageDescription).
+const mic = microphoneSwitch(cfg, build)
+const storage = storageSwitch(cfg, build)  // IndexedDB + Cache API (host.json storage, WP-26)
+if (!existsSync(join(build, 'build.ninja')) || webrtc.stale || mic.stale || storage.stale) run('cmake', ['-S', 'host', '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', webrtc.define, mic.define, storage.define])
 run('ninja', ['-C', build, 'webxrhost-mac'])
 if (flag('--app')) { packageApp(); process.exit(0) }
 if (flag('--no-run')) process.exit(0)
@@ -116,7 +120,8 @@ function packageApp() {
   <key>CFBundleVersion</key><string>${version}</string>
   <key>CFBundleIconFile</key><string>${icon}</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHighResolutionCapable</key><true/>${mic.on ? `
+  <key>NSMicrophoneUsageDescription</key><string>${name} uses the microphone when the page asks for it.</string>` : ''}
 </dict></plist>
 `)
   run('codesign', ['--force', '--deep', '--sign', '-', app])

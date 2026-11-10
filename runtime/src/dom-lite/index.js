@@ -12,7 +12,7 @@ function warnOnce(key, msg) { if (WARNED.has(key)) return; WARNED.add(key); W.__
 const camel = (k) => k.startsWith('--') ? k : k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
 const kebab = (k) => k.startsWith('--') ? k : k.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())
 class CSSStyleDeclaration {
-  constructor() { return new Proxy(this, { get: (t, k) => k in t ? t[k] : (typeof k === 'string' ? (t._v?.[k] ?? '') : undefined), set: (t, k, v) => { if (k in t) t[k] = v; else (t._v ??= {})[camel(String(k))] = String(v); return true } }) }
+  constructor() { this._v = {}; return new Proxy(this, { get: (t, k) => k in t ? t[k] : (typeof k === 'string' ? (t._v?.[k] ?? '') : undefined), set: (t, k, v) => { if (k in t) t[k] = v; else (t._v ??= {})[camel(String(k))] = String(v); return true } }) }
   setProperty(k, v) { (this._v ??= {})[camel(String(k))] = String(v ?? '') } getPropertyValue(k) { return this._v?.[camel(String(k))] ?? '' } removeProperty(k) { k = camel(String(k)); const v = this._v?.[k] ?? ''; if (this._v) delete this._v[k]; return v }
   get cssText() { return Object.entries(this._v ?? {}).map(([k, v]) => `${kebab(k)}: ${v};`).join(' ') }
   set cssText(text) { this._v = {}; for (const d of String(text ?? '').split(';')) { const i = d.indexOf(':'); if (i > 0) this._v[camel(d.slice(0, i).trim())] = d.slice(i + 1).trim() } }
@@ -61,6 +61,8 @@ export class Node extends ev.EventTarget {
   get textContent() { return this.childNodes.map(c => c.textContent ?? '').join('') } set textContent(v) { this.childNodes = []; if (v != null && v !== '') this.appendChild(new Text(String(v))) }
   normalize() {}
 }
+const NODE_CONST = { ELEMENT_NODE: 1, ATTRIBUTE_NODE: 2, TEXT_NODE: 3, CDATA_SECTION_NODE: 4, PROCESSING_INSTRUCTION_NODE: 7, COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_TYPE_NODE: 10, DOCUMENT_FRAGMENT_NODE: 11 }
+Object.assign(Node, NODE_CONST); Object.assign(Node.prototype, NODE_CONST)
 export class Text extends Node { constructor(data = '') { super(); this.data = String(data); this.nodeType = 3; this.nodeName = '#text' } get textContent() { return this.data } set textContent(v) { this.data = String(v) } get nodeValue() { return this.data } get length() { return this.data.length } }
 export class Comment extends Text { constructor(d) { super(d); this.nodeType = 8; this.nodeName = '#comment' } }
 export class Element extends Node {
@@ -70,10 +72,22 @@ export class Element extends Node {
   get className() { return this.classList.value } set className(v) { this.classList.value = v }
   get children() { return this.childNodes.filter(c => c instanceof Element) } get childElementCount() { return this.children.length } get firstElementChild() { return this.children[0] ?? null } get lastElementChild() { const c = this.children; return c[c.length - 1] ?? null }
   get innerHTML() { return this._html ?? '' } set innerHTML(v) { this._html = String(v); this.childNodes = [] } get outerHTML() { return `<${this.localName}>${this.innerHTML}</${this.localName}>` } get innerText() { return this.textContent } set innerText(v) { this.textContent = v }
-  setAttribute(k, v) { k = String(k).toLowerCase(); this._attrs.set(k, String(v)); if (k === 'style') this.style.cssText = v; if (k === 'class') this.classList.value = v; if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(v) }
+  setAttribute(k, v) {
+    k = String(k).toLowerCase(); this._attrs.set(k, String(v))
+    if (k === 'style') this.style.cssText = v
+    if (k === 'class') this.classList.value = v
+    if (k === 'id') this.id = v
+    // A reflected property with a setter (script.src, link.href) must run it. PlayCanvas loads Ammo with
+    // setAttribute('src') before appendChild, and the load starts from that setter once the node is connected.
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(this), k)
+    if (desc?.set) desc.set.call(this, v)
+    if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(v)
+  }
   getAttribute(k) { k = String(k).toLowerCase(); if (k === 'class') return this.classList.value || (this._attrs.has('class') ? '' : null); return this._attrs.has(k) ? this._attrs.get(k) : null }
   hasAttribute(k) { return this._attrs.has(String(k).toLowerCase()) } removeAttribute(k) { this._attrs.delete(String(k).toLowerCase()) } getAttributeNames() { return [...this._attrs.keys()] } toggleAttribute(k, f) { const has = this.hasAttribute(k); const want = f === undefined ? !has : !!f; want ? this.setAttribute(k, '') : this.removeAttribute(k); return want }
-  setAttributeNS(ns, k, v) { this.setAttribute(k, v) } getAttributeNS(ns, k) { return this.getAttribute(k) } get attributes() { return [...this._attrs].map(([name, value]) => ({ name, value })) }
+  setAttributeNS(ns, k, v) { this.setAttribute(k, v) } getAttributeNS(ns, k) { return this.getAttribute(k) }
+  // NamedNodeMap: HTML attrs are un-namespaced; XML parse (below) fills _xmlAttrs with real namespaceURI / localName.
+  get attributes() { return new NamedNodeMap(this._xmlAttrs ?? [...this._attrs].map(([name, value]) => new Attr(name, value, null, name, null))) }
   getBoundingClientRect() { const r = this._hostRect; if (r) return new DOMRect(r[0], r[1], r[2], r[3]); const big = this._fillsViewport?.(); return big ? new DOMRect(0, 0, W.innerWidth, W.innerHeight) : new DOMRect(0, 0, this.clientWidth, this.clientHeight) }  // _hostRect: a touch zone's box (input.js)
   getClientRects() { return [this.getBoundingClientRect()] }
   get clientWidth() { return this._hostRect ? this._hostRect[2] : this._fillsViewport?.() ? W.innerWidth : (this._w ?? 0) } get clientHeight() { return this._hostRect ? this._hostRect[3] : this._fillsViewport?.() ? W.innerHeight : (this._h ?? 0) }
@@ -82,7 +96,7 @@ export class Element extends Node {
   focus() {} blur() {} click() { this.dispatchEvent(new ev.MouseEvent('click', { bubbles: true })) } scrollIntoView() {} scrollTo() {} scroll() {}
   requestPointerLock() { return requestPointerLock(this) } requestFullscreen() { return Promise.resolve() }
   setPointerCapture(id) { W.__hostPointerCapture?.(this, id, true) } releasePointerCapture(id) { W.__hostPointerCapture?.(this, id, false) } hasPointerCapture(id) { return !!W.__hostPointerCapture?.(this, id) }
-  querySelector(sel) { return querySel(this, sel)[0] ?? null } querySelectorAll(sel) { return querySel(this, sel) } getElementsByTagName(t) { return querySel(this, t) } getElementsByClassName(c) { return querySel(this, '.' + c) }
+  querySelector(sel) { return querySel(this, sel)[0] ?? null } querySelectorAll(sel) { return querySel(this, sel) } getElementsByTagName(t) { return querySel(this, t) } getElementsByTagNameNS(ns, l) { return collectNS(this, ns, l) } getElementsByClassName(c) { return querySel(this, '.' + c) }
   matches(sel) { return matchOne(this, sel) } closest(sel) { for (let p = this; p; p = p.parentElement) if (matchOne(p, sel)) return p; return null }
   append(...n) { for (const x of n) this.appendChild(x instanceof Node ? x : new Text(x)) } prepend(...n) { for (const x of n.reverse()) this.insertBefore(x instanceof Node ? x : new Text(x), this.firstChild) } replaceChildren(...n) { this.childNodes = []; this.append(...n) }
   before(...n) { for (const x of n) this.parentNode?.insertBefore(x instanceof Node ? x : new Text(x), this) } after(...n) { for (const x of n.reverse()) this.parentNode?.insertBefore(x instanceof Node ? x : new Text(x), this.nextSibling) }
@@ -164,6 +178,19 @@ function matchOne(el, sel) { const list = parseSelector(sel); for (let i = 0; i 
 export class NodeList extends Array { static get [Symbol.species]() { return Array } item(i) { return this[i] ?? null } }
 export class HTMLCollection extends Array { static get [Symbol.species]() { return Array } item(i) { return this[i] ?? null } namedItem(n) { return this.find(e => e.id === n || e.getAttribute?.('name') === n) ?? null } }
 function querySel(root, sel) { const out = new NodeList(); const walk = (n) => { for (const c of n.childNodes ?? []) { if (c.nodeType === 1) { if (matchOne(c, sel)) out.push(c); walk(c) } } }; walk(root); return out }  // nodeType, not instanceof: a canvas (images/) is an element too
+function collectNS(root, ns, local) {
+  const out = new NodeList(), anyNs = ns === '*', anyLocal = local === '*'
+  const walk = (n) => { for (const c of n.childNodes ?? []) { if (c.nodeType !== 1) continue; if ((anyNs || c.namespaceURI === ns) && (anyLocal || c.localName === local)) out.push(c); walk(c) } }
+  return (walk(root), out)
+}
+class Attr { constructor(name, value, namespaceURI, localName, prefix) { this.name = name; this.value = String(value); this.nodeValue = this.value; this.nodeType = 2; this.namespaceURI = namespaceURI; this.localName = localName; this.prefix = prefix; this.specified = true } }
+class NamedNodeMap {
+  constructor(a) { this._a = a }
+  get length() { return this._a.length } item(i) { return this._a[i] ?? null }
+  getNamedItem(name) { return this._a.find(a => a.name === name) ?? null }
+  getNamedItemNS(ns, local) { return this._a.find(a => a.namespaceURI === ns && a.localName === local) ?? null }
+  [Symbol.iterator]() { return this._a[Symbol.iterator]() }
+}
 
 export class HTMLElement extends Element { constructor(tag) { super(tag); this.lang = ''; this.dir = ''; this.draggable = false; this.spellcheck = false } }
 export class HTMLDivElement extends HTMLElement { constructor() { super('div') } }
@@ -175,14 +202,26 @@ export class HTMLAnchorElement extends HTMLElement { constructor() { super('a');
 export class HTMLButtonElement extends HTMLElement { constructor() { super('button'); this.disabled = false; this.type = 'submit' } }
 export class HTMLInputElement extends HTMLElement { constructor() { super('input'); this.value = ''; this.type = 'text'; this.disabled = false; this.checked = false } select() {} setSelectionRange() {} }
 export class HTMLStyleElement extends HTMLElement { constructor() { super('style'); this.sheet = { cssRules: [], insertRule() { return 0 }, deleteRule() {} } } }
+const SW_HOOK = Symbol.for('webxr-host.serviceworker')  // set by runtime/src/serviceworker (host.json web.serviceWorker)
 export class HTMLScriptElement extends HTMLElement {
   constructor() { super('script'); this.async = true; this.defer = false; this.type = ''; this.noModule = false; this.crossOrigin = null; this._src = '' }
   // Loaded once, when it is in the document with a src: inserted with one, or (as a browser does) given one after an
   // empty insert (Wonderland's loadScript appends first, then sets src).
   get src() { return this._src } set src(v) { this._src = String(v); if (this.isConnected) this._connected() }
-  _connected() { if (!this._src || this._started) return; this._started = true; const g = globalThis
-    const url = new g.URL(this._src, g.location.href).href
-    g.fetch(url).then(async r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); const text = await r.text(); if (this.type === 'module') await import(url); else g.__hostEvalScript?.(text, url); this.dispatchEvent(new ev.Event('load')) }, e => { g.__native?.log?.(3, `script ${url}: ${e}`); this.dispatchEvent(new ev.Event('error')) }) }
+  _connected() { if (!this._src || this._started) return; this._started = true
+    const url = new W.URL(this._src, W.location.href).href
+    const sw = W[SW_HOOK]  // a controlling service worker sees the load as a script request (WP-27)
+    ;(sw ? sw.load(url, 'script') : W.fetch(url)).then(async r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const text = await r.text()
+      if (this.type === 'module') await import(url)
+      else {
+        const prev = W.document?.currentScript
+        if (W.document) W.document.currentScript = this
+        try { W.__hostEvalScript?.(text, url) } finally { if (W.document) W.document.currentScript = prev ?? null }
+      }
+      this.dispatchEvent(new ev.Event('load'))
+    }, e => { W.__native?.log?.(3, `script ${url}: ${e}`); this.dispatchEvent(new ev.Event('error')) }) }
 }
 export class HTMLLinkElement extends HTMLElement {
   constructor() { super('link'); this.rel = ''; this.as = ''; this.crossOrigin = null; this.media = ''; this.type = ''; this.sheet = null; this._href = '' }
@@ -238,7 +277,7 @@ export class Document extends Node {
   createTreeWalker() { return { nextNode: () => null, currentNode: null } } createNodeIterator() { return { nextNode: () => null } } importNode(n, deep) { return n.cloneNode(deep) } adoptNode(n) { return n }
   getElementById(id) {
     return querySel(this, '#' + id)[0] ?? null }
-  querySelector(s) { return querySel(this, s)[0] ?? null } querySelectorAll(s) { return querySel(this, s) } getElementsByTagName(t) { return t === 'body' ? [this.body] : t === 'head' ? [this.head] : querySel(this, t) } getElementsByClassName(c) { return querySel(this, '.' + c) } getElementsByName() { return [] }
+  querySelector(s) { return querySel(this, s)[0] ?? null } querySelectorAll(s) { return querySel(this, s) } getElementsByTagName(t) { return t === 'body' ? [this.body] : t === 'head' ? [this.head] : querySel(this, t) } getElementsByTagNameNS(ns, l) { return collectNS(this, ns, l) } getElementsByClassName(c) { return querySel(this, '.' + c) } getElementsByName() { return [] }
   hasFocus() { return true } elementFromPoint() { return null } elementsFromPoint() { return [] } exitPointerLock() { if (!this.pointerLockElement) return; this.pointerLockElement = null; W.__native?.input?.pointerLock?.(false); this.dispatchEvent(new ev.Event('pointerlockchange')) } exitFullscreen() { return Promise.resolve() } getSelection() { return { removeAllRanges() {}, addRange() {}, rangeCount: 0, toString: () => '' } } execCommand() { return false } write() {} writeln() {} open() { return this } close() {}
   get fullscreenEnabled() { return false } get pictureInPictureEnabled() { return false }
 }
@@ -246,19 +285,43 @@ export class Document extends Node {
 // through it); HTML stays a stub document. Elements keep their names' case, as in an XML document.
 const XML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
 const unescapeXml = (t) => t.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#' ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : +e.slice(1)) : XML_ENTITIES[e] ?? m)
+const XMLNS_NS = 'http://www.w3.org/2000/xmlns/', SVG_NS = 'http://www.w3.org/2000/svg'
+// Default xmlns applies to elements only (never to unprefixed attributes) and is inherited. xmlns:prefix binds a
+// prefix for this element and its descendants. lazy-widgets UI XML depends on both: <ui-tree xmlns="lazy-widgets"
+// xmlns:option="lazy-widgets:options"> then getElementsByTagNameNS + attribute.namespaceURI.
 function parseXml(src) {
-  const root = new DocumentFragment(), stack = [root]
+  const root = new DocumentFragment(), stack = [root], nsStack = [Object.create(null)], defStack = [null]
   const re = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<\?[\s\S]*?\?>|<!DOCTYPE[^>]*>|<\/([^\s>]+)\s*>|<([^\s/>]+)((?:\s+[^\s=/>]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)>|([^<]+)/gi
   for (let m; (m = re.exec(src));) {
     const top = stack[stack.length - 1]
     if (m[1] !== undefined) top.appendChild(new Text(m[1]))
-    else if (m[2]) { if (stack.length > 1) stack.pop() }
+    else if (m[2]) { if (stack.length > 1) { stack.pop(); nsStack.pop(); defStack.pop() } }
     else if (m[3]) {
-      const name = m[3], el = name === 'svg' || top.namespaceURI === 'http://www.w3.org/2000/svg' ? new SVGElement(name) : new Element(name)
-      el.tagName = el.nodeName = el.localName = name
-      for (const a of m[4].matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'))?/g)) el.setAttribute(a[1], unescapeXml(a[2] ?? a[3] ?? ''))
+      const name = m[3]
+      const raw = [...m[4].matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'))?/g)].map(a => ({ name: a[1], value: unescapeXml(a[2] ?? a[3] ?? '') }))
+      const prefixes = Object.create(nsStack[nsStack.length - 1])
+      let def = defStack[defStack.length - 1]
+      for (const a of raw) {
+        if (a.name === 'xmlns') def = a.value || null
+        else if (a.name.startsWith('xmlns:')) prefixes[a.name.slice(6)] = a.value
+      }
+      const colon = name.indexOf(':')
+      const prefix = colon >= 0 ? name.slice(0, colon) : null, local = colon >= 0 ? name.slice(colon + 1) : name
+      let ns = prefix ? (prefixes[prefix] ?? null) : def
+      if (!ns && local === 'svg') { ns = SVG_NS; def = SVG_NS }  // a bare <svg> is SVG, and so are the elements inside it
+      const el = ns === SVG_NS ? new SVGElement(local) : new Element(local)
+      el.tagName = el.nodeName = name; el.localName = local; el.prefix = prefix; el.namespaceURI = ns
+      el._xmlAttrs = []
+      for (const a of raw) {
+        let ap = null, al = a.name, ans = null
+        if (a.name === 'xmlns') { ans = XMLNS_NS; al = 'xmlns' }
+        else if (a.name.startsWith('xmlns:')) { ans = XMLNS_NS; ap = 'xmlns'; al = a.name.slice(6) }
+        else if (a.name.includes(':')) { const i = a.name.indexOf(':'); ap = a.name.slice(0, i); al = a.name.slice(i + 1); ans = prefixes[ap] ?? null }
+        el._xmlAttrs.push(new Attr(a.name, a.value, ans, al, ap))
+        el.setAttribute(a.name, a.value)
+      }
       top.appendChild(el)
-      if (!m[5]) stack.push(el)
+      if (!m[5]) { stack.push(el); nsStack.push(prefixes); defStack.push(def) }
     } else if (m[6] !== undefined && m[6].trim()) top.appendChild(new Text(unescapeXml(m[6])))
   }
   return root.children[0] ?? null

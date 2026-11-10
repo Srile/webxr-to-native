@@ -19,7 +19,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, w
 import { basename, dirname, join, resolve } from 'node:path'
 import { arch } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { gameArg, webrtcSwitch } from './game.mjs'
+import { gameArg, webrtcSwitch, microphoneSwitch, storageSwitch } from './game.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -49,9 +49,11 @@ if (opt('--port')) { const f = join(assets, 'host.json'), m = JSON.parse(readFil
 
 // 2. the executable
 const webrtc = webrtcSwitch(cfg, build)  // host.json network.webrtc (WP-21; tools/game.mjs)
+const mic = microphoneSwitch(cfg, build)  // host.json media.microphone (WP-25): PulseAudio record
+const storage = storageSwitch(cfg, build)  // host.json storage.indexedDB / storage.cache (WP-26)
 if (!existsSync(join(build, 'build.ninja')))
-  run('cmake', ['-S', 'host', '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', `-DV8_PREFIX=${v8}`, ...(xr ? ['-DHOST_LINUX_XR=ON'] : []), ...(angle ? ['-DHOST_LINUX_ANGLE=ON'] : []), webrtc.define])
-else if (xr || webrtc.stale) run('cmake', [build, ...(xr ? ['-DHOST_LINUX_XR=ON'] : []), webrtc.define])
+  run('cmake', ['-S', 'host', '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', `-DV8_PREFIX=${v8}`, ...(xr ? ['-DHOST_LINUX_XR=ON'] : []), ...(angle ? ['-DHOST_LINUX_ANGLE=ON'] : []), webrtc.define, mic.define, storage.define])
+else if (xr || webrtc.stale || mic.stale || storage.stale) run('cmake', [build, ...(xr ? ['-DHOST_LINUX_XR=ON'] : []), webrtc.define, mic.define, storage.define])
 run('ninja', ['-C', build, target])
 if (app) { packageApp(); process.exit(0) }
 if (flag('--no-run')) { console.log(join(build, target)); process.exit(0) }

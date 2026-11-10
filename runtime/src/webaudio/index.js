@@ -12,7 +12,7 @@
 //   closeContext(id)            frees the graph, buffers it held, the stream
 //   contextTime(id) → seconds   rendered frames / sampleRate (never wall time)
 //   resume(id) / suspend(id) → bool   realtime only
-//   createNode(ctx, kind) → handle    kind: 'gain' | 'bufferSource' | 'oscillator' | 'biquad' | 'compressor' | 'panner'
+//   createNode(ctx, kind) → handle    kind: 'gain' | 'bufferSource' | 'oscillator' | 'biquad' | 'compressor' | 'panner' | 'analyser' | 'mediaStream'
 //   releaseNode(handle)         the JS wrapper is gone; native frees the node once it can never sound
 //   connect(from, output, to, input) → bool
 //   connectParam(from, output, to, paramName) → bool
@@ -42,11 +42,16 @@
 //   detach(arrayBuffer) → bool    browsers detach decodeAudioData's input; so do we
 //   offlineRender(ctx, cb(bufferId|0, channels, length, sampleRate)) → bool
 //   stats(ctx?) → { contexts, buffers, endedCallbacks, maxNodes, liveNodes?, droppedMsgs?, droppedCommands? }
+//   analyserSize(node, fftSize) → bool            (WP-25) an 'analyser' node's history + FFT, sized here (host thread)
+//   analyserTime(node, Float32Array|Uint8Array)    the latest fftSize samples into the array, in place
+//   analyserFrequency(node, Float32Array|Uint8Array, smoothing, minDb, maxDb)   the spec's frequency data, in place
+//   setInput(node, trackId) → bool                 a 'mediaStream' node reads that capture track (only in a build
+//                                                  with the microphone, media/index.js; absent otherwise)
 // The listener is a reserved handle: setParam/scheduleParam on it with
 // positionX..Z, forwardX..Z, upX..Z. Every node has one input (sources none)
 // and one output, so the output/input indices are validated here and 0 natively.
 
-const KINDS = { gain: 'gain', bufferSource: 'bufferSource', oscillator: 'oscillator', biquad: 'biquad', compressor: 'compressor', panner: 'panner' }
+const KINDS = { gain: 'gain', bufferSource: 'bufferSource', oscillator: 'oscillator', biquad: 'biquad', compressor: 'compressor', panner: 'panner', analyser: 'analyser' }
 const OSC_TYPES = ['sine', 'square', 'sawtooth', 'triangle']
 const FILTER_TYPES = ['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']
 const DISTANCE_MODELS = ['inverse', 'linear', 'exponential']
@@ -243,6 +248,37 @@ export function install(g) {
       }, enumerable: true, configurable: true,
     })
   }
+  // AnalyserNode (WP-25; not gated: a plain graph node). Its input passes through; the native side keeps the input's
+  // history and computes the spec's analysis on each get*Data call (host/audio/analyser.cpp), writing into the
+  // page's own array. Buffers are sized when fftSize is set, never on the render thread.
+  class AnalyserNode extends AudioNode {
+    constructor(ctx, opts = {}) {
+      super(ctx, N.createNode(ctx._id, KINDS.analyser), 1, 1)
+      this._fft = 2048; this._min = -100; this._max = -30; this._smooth = 0.8
+      if (opts.fftSize !== undefined) this.fftSize = opts.fftSize; else N.analyserSize(this._h, this._fft)
+      const min = opts.minDecibels === undefined ? -100 : finite(opts.minDecibels, 'minDecibels'), max = opts.maxDecibels === undefined ? -30 : finite(opts.maxDecibels, 'maxDecibels')
+      if (!(min < max)) throw err('IndexSizeError', `minDecibels (${min}) must be less than maxDecibels (${max})`)
+      this._min = min; this._max = max
+      if (opts.smoothingTimeConstant !== undefined) this.smoothingTimeConstant = opts.smoothingTimeConstant
+    }
+    get fftSize() { return this._fft }
+    set fftSize(v) {
+      v = Math.trunc(finite(v, 'fftSize'))
+      if (v < 32 || v > 32768 || (v & (v - 1)) !== 0) throw err('IndexSizeError', `fftSize ${v} is not a power of two between 32 and 32768`)
+      this._fft = v; N.analyserSize(this._h, v)
+    }
+    get frequencyBinCount() { return this._fft / 2 }
+    get minDecibels() { return this._min }
+    set minDecibels(v) { v = finite(v, 'minDecibels'); if (v >= this._max) throw err('IndexSizeError', `minDecibels (${v}) must be less than maxDecibels (${this._max})`); this._min = v }
+    get maxDecibels() { return this._max }
+    set maxDecibels(v) { v = finite(v, 'maxDecibels'); if (v <= this._min) throw err('IndexSizeError', `maxDecibels (${v}) must be greater than minDecibels (${this._min})`); this._max = v }
+    get smoothingTimeConstant() { return this._smooth }
+    set smoothingTimeConstant(v) { v = finite(v, 'smoothingTimeConstant'); if (v < 0 || v > 1) throw err('IndexSizeError', 'smoothingTimeConstant must be between 0 and 1'); this._smooth = v }
+    getFloatFrequencyData(a) { if (!(a instanceof Float32Array)) throw new TypeError('getFloatFrequencyData: Float32Array required'); N.analyserFrequency(this._h, a, this._smooth, this._min, this._max) }
+    getByteFrequencyData(a) { if (!(a instanceof Uint8Array)) throw new TypeError('getByteFrequencyData: Uint8Array required'); N.analyserFrequency(this._h, a, this._smooth, this._min, this._max) }
+    getFloatTimeDomainData(a) { if (!(a instanceof Float32Array)) throw new TypeError('getFloatTimeDomainData: Float32Array required'); N.analyserTime(this._h, a) }
+    getByteTimeDomainData(a) { if (!(a instanceof Uint8Array)) throw new TypeError('getByteTimeDomainData: Uint8Array required'); N.analyserTime(this._h, a) }
+  }
   class AudioListener {
     constructor(ctx, handle) {
       this._ctx = ctx; this._h = handle
@@ -307,6 +343,7 @@ export function install(g) {
     createBiquadFilter() { return new BiquadFilterNode(this) }
     createDynamicsCompressor() { return new DynamicsCompressorNode(this) }
     createPanner() { return new PannerNode(this) }
+    createAnalyser() { return new AnalyserNode(this) }
     decodeAudioData(data, successCb, errorCb) {
       return new Promise((resolve, reject) => {
         if (!(data instanceof ArrayBuffer)) { const e = new TypeError('decodeAudioData: ArrayBuffer required'); errorCb?.(e); reject(e); return }
@@ -371,9 +408,29 @@ export function install(g) {
     suspend() { return Promise.reject(err('NotSupportedError', 'OfflineAudioContext.suspend is not implemented')) }
   }
 
+  // Stubs, not a capture implementation. adapter.js does `MediaStream = MediaStream || webkitMediaStream`, which
+  // stores undefined when neither exists, and Howler then throws on `x instanceof MediaStream` ("right-hand side
+  // is not an object") while setting up a sound. A constructor makes that check false for a normal source.
+  class MediaStreamTrack {
+    constructor() { this.kind = 'audio'; this.id = ''; this.label = ''; this.enabled = true; this.muted = false; this.readyState = 'ended' }
+    stop() { this.readyState = 'ended' }
+    clone() { return new MediaStreamTrack() }
+  }
+  class MediaStream {
+    constructor(tracks) { this._tracks = tracks ? [...tracks] : [] }
+    getTracks() { return this._tracks.slice() }
+    getAudioTracks() { return this._tracks.filter((t) => t.kind !== 'video') }
+    getVideoTracks() { return this._tracks.filter((t) => t.kind === 'video') }
+    addTrack(t) { this._tracks.push(t) }
+    removeTrack(t) { const i = this._tracks.indexOf(t); if (i >= 0) this._tracks.splice(i, 1) }
+    get id() { return '' }
+    get active() { return false }
+  }
   Object.assign(g, {
     AudioContext, OfflineAudioContext, BaseAudioContext, AudioNode, AudioScheduledSourceNode, AudioDestinationNode, AudioListener,
-    AudioParam, AudioBuffer, AudioBufferSourceNode, OscillatorNode, GainNode, BiquadFilterNode, DynamicsCompressorNode, PannerNode,
+    AudioParam, AudioBuffer, AudioBufferSourceNode, OscillatorNode, GainNode, BiquadFilterNode, DynamicsCompressorNode, PannerNode, AnalyserNode,
+    MediaStream, MediaStreamTrack,
   })
   g.webkitAudioContext = AudioContext
+  g.webkitMediaStream = MediaStream
 }

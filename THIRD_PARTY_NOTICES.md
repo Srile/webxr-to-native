@@ -26,9 +26,9 @@ Builds with `network.webrtc` contain libdatachannel and libjuice, which are MPL-
 people you distribute to where the source code of those files is. The notices file does that: it names the
 upstream release and the one patch this toolkit applies (`tools/patches/libdatachannel-0.24.6-mbedtls-verify.patch`).
 
-The prebuilt Apple libraries attached to this repository's releases (`v8-apple-*`, `angle-apple-*`) are binary
-distributions of V8, ICU and ANGLE too. Each archive carries the matching texts from `licenses/` in a `LICENSES/`
-folder.
+The prebuilt libraries attached to this repository's releases (`v8-apple-*`, `angle-apple-*`, and `v8-android-intl-*`, the
+Android V8 with ICU that `js.intl` links) are binary distributions of V8, ICU and ANGLE too. Each archive carries
+the matching texts from `licenses/` in a `LICENSES/` folder.
 
 ## Inside built apps
 
@@ -38,8 +38,10 @@ folder.
 | [gl-matrix](https://github.com/toji/gl-matrix) | 3.4.4 | MIT | npm, via IWER | all |
 | [V8](https://v8.dev) | Android 14.9.207.39 (NativeScript's build); macOS/Linux Homebrew 15.6; Windows NuGet 13.0.245.25; iOS/visionOS 15.6.75.19 from source, or npm `v8-ios` 11.110.1 | BSD-3-Clause, with fdlibm and Strongtalk notices | `tools/setup*.sh` | all |
 | Code built into V8: Abseil, Dragonbox, fast_float, FP16, Highway, inspector_protocol, LLVM libc, PartitionAlloc, rapidhash, simdutf, SipHash, UTF-8 decoder, zlib | as pinned by V8 | Apache-2.0, BSL-1.0, MIT, BSD-3-Clause, BSD-2-Clause, CC0-1.0, Zlib | inside V8 | all |
-| [ICU](https://icu.unicode.org) | as built with V8 | Unicode-3.0 | inside V8 / `icudtl.dat` | macOS, Windows, Linux, iOS, visionOS |
+| [ICU](https://icu.unicode.org) | as built with V8 (Android: 77.1) | Unicode-3.0 | inside V8 / `icudtl.dat` | macOS, Windows, Linux, iOS, visionOS; Android games with `js.intl` |
 | [stb](https://github.com/nothings/stb) (image, image_write, vorbis, truetype) | commit `f0569113` | MIT OR Unlicense | `tools/setup.sh` | all |
+| [nanosvg](https://github.com/memononen/nanosvg) | commit `239e102e` | Zlib | `tools/setup.sh` | games with `web.svg` |
+| [SQLite](https://sqlite.org) | 3.54.1 | blessing (public domain) | `tools/setup-storage.sh`, on first need | games with `storage.indexedDB` or `storage.cache` |
 | [dr_mp3](https://github.com/mackron/dr_libs) | 0.7.4 | Unlicense OR MIT-0 | `tools/setup.sh` | all |
 | [Opus](https://opus-codec.org) (decoder) | 1.5.2 | BSD-3-Clause | `tools/setup.sh` | all |
 | [libwebp](https://chromium.googlesource.com/webm/libwebp) (decoder) | 1.5.0 | BSD-3-Clause, with a patent grant | `tools/setup.sh` | all |

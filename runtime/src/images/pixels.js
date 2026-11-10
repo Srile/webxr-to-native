@@ -65,16 +65,32 @@ export function blendPixel(dst, di, r, g, b, a) {
   dst[di + 3] = Math.round(oa * 255)
 }
 
+// One pixel under a composite mode: 0 source-over, 1 copy (the source replaces the destination, so a transparent
+// source clears it), 2 destination-out (the source alpha punches the destination; its colour does not matter).
+export function compositePixel(dst, di, r, g, b, a, mode) {
+  if (mode === 1) { dst[di] = r; dst[di + 1] = g; dst[di + 2] = b; dst[di + 3] = a >= 255 ? 255 : a <= 0 ? 0 : Math.round(a); return }
+  if (mode === 2) {
+    if (a <= 0) return
+    dst[di + 3] = a >= 255 ? 0 : Math.round(dst[di + 3] * (1 - a / 255))
+    return
+  }
+  blendPixel(dst, di, r, g, b, a)
+}
+
 // Draws the source window (sx, sy, sw, sh) of src (srcW × srcH) onto the
 // destination rect (dx, dy, dw, dh) of dst (dstW × dstH): nearest-neighbour,
 // source-over, globalAlpha applied. Negative dw/dh mirror the picture.
-export function blit(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, dw, dh, alpha) {
-  if (!(sw > 0) || !(sh > 0) || dw === 0 || dh === 0 || !(alpha > 0)) return
+// clip is a device rect [x0, y0, x1, y1] or a mask {kind:'mask', x, y, w, h, bits}; mode as compositePixel.
+export function blit(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, dw, dh, alpha, clip, mode = 0) {
+  if (!(sw > 0) || !(sh > 0) || dw === 0 || dh === 0 || (!(alpha > 0) && mode !== 1)) return
   let mirrorX = false, mirrorY = false
   if (dw < 0) { dx += dw; dw = -dw; mirrorX = true }
   if (dh < 0) { dy += dh; dh = -dh; mirrorY = true }
-  const x0 = Math.max(0, Math.floor(dx)), x1 = Math.min(dstW, Math.ceil(dx + dw))
-  const y0 = Math.max(0, Math.floor(dy)), y1 = Math.min(dstH, Math.ceil(dy + dh))
+  let x0 = Math.max(0, Math.floor(dx)), x1 = Math.min(dstW, Math.ceil(dx + dw))
+  let y0 = Math.max(0, Math.floor(dy)), y1 = Math.min(dstH, Math.ceil(dy + dh))
+  const mask = clip && clip.kind === 'mask' ? clip : null
+  if (Array.isArray(clip)) { x0 = Math.max(x0, clip[0]); y0 = Math.max(y0, clip[1]); x1 = Math.min(x1, clip[2]); y1 = Math.min(y1, clip[3]) }
+  if (x1 <= x0 || y1 <= y0) return
   for (let py = y0; py < y1; py++) {
     let v = (py + 0.5 - dy) / dh
     if (v < 0 || v >= 1) continue
@@ -82,6 +98,7 @@ export function blit(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, d
     const syy = Math.floor(sy + v * sh)
     if (syy < 0 || syy >= srcH) continue
     for (let px = x0; px < x1; px++) {
+      if (mask && (px < mask.x || py < mask.y || px >= mask.x + mask.w || py >= mask.y + mask.h || !mask.bits[(py - mask.y) * mask.w + (px - mask.x)])) continue
       let u = (px + 0.5 - dx) / dw
       if (u < 0 || u >= 1) continue
       if (mirrorX) u = 1 - u
@@ -89,7 +106,7 @@ export function blit(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, d
       if (sxx < 0 || sxx >= srcW) continue
       const si = (syy * srcW + sxx) * 4
       const a = alpha >= 1 ? src[si + 3] : src[si + 3] * alpha
-      blendPixel(dst, (py * dstW + px) * 4, src[si], src[si + 1], src[si + 2], a)
+      compositePixel(dst, (py * dstW + px) * 4, src[si], src[si + 1], src[si + 2], a, mode)
     }
   }
 }

@@ -1,5 +1,6 @@
 // Imports the game's entry module once the surface is up.
-export function boot(g) {
+// before: a promise the entry waits for (a service worker that takes over at this start, WP-27), or undefined.
+export function boot(g, before) {
   const n = g.__native
   const cfg = n.config ?? {}
   const entry = cfg.web?.entry
@@ -11,7 +12,13 @@ export function boot(g) {
   const inject = (cfg.web?.inject ?? []).map((p) => origin + '/' + p)
   // Vite's modulepreload links are fetched by the browser; here the module graph loads on demand, so just warm the cache.
   n.loop.postTask(() => {
-    let ready = Promise.resolve()
+    // Classic inline scripts in index.html (host.json web.inlineScripts: true; tools/pack.mjs stages their text).
+    // The host does not parse the document, and a deferred module runs after them in a browser, so they run here,
+    // before the entry: a page's own startup, including a click on a VR button the host never draws.
+    const inline = cfg.web?.inlineScripts
+    if (Array.isArray(inline)) for (const text of inline) g.__hostEvalScript?.(text, 'index.html')
+
+    let ready = Promise.resolve(before)
     for (const u of inject) ready = ready.then(() => import(u)).then(() => n.log(1, `boot: injected ${u}`), (e) => n.log(3, `boot: inject ${u} failed: ${e?.stack ?? e}`))
     ready.then(() => {
       n.log(1, `boot: import ${url}`)

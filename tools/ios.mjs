@@ -33,6 +33,7 @@ const cfgPath = cfgArg && resolve(cfgArg)
 if (!cfgPath) { console.error('usage: ios.mjs <host.json | game repo> [--vision] [--device] [--sim <name|udid>] [--no-run] [--console] [--fresh] [--port N]'); process.exit(2) }
 if (process.platform !== 'darwin') { console.error('ios.mjs: macOS only (Xcode)'); process.exit(2) }
 const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
+if (cfg.media?.microphone === true) console.warn('ios.mjs: microphone capture (host.json media.microphone) is not built for iOS or visionOS; the page has no navigator.mediaDevices')
 const device = flag('--device'), vision = flag('--vision')
 const os = vision ? 'vision' : 'ios'
 const name = cfg.app?.name ?? 'webxr-host', version = appVersion(cfg, cfgPath)

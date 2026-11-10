@@ -10,12 +10,16 @@
 #include "js/engine.h"
 #include "js/gc.h"
 #include "js/console.h"
+#include "js/intl.h"
 #include "core/log.h"
+#include "core/fs.h"
 #include <v8-value-serializer.h>
 #include <atomic>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <thread>
 
 namespace host {
@@ -46,6 +50,9 @@ v8::MaybeLocal<v8::Value> deserialize(v8::Isolate* iso, v8::Local<v8::Context> c
 
 struct Worker {
   int id; std::string source, url; bool isModule;
+  // spawn's options (a worker flavour built on the prelude, WP-27's service worker): the prelude asset that runs
+  // before the script (default host-worker.js) and a structured-clone value it finds as __native.init.
+  std::string prelude = "host-worker.js"; Msg init; bool hasInit = false;
   std::thread thread; std::atomic<bool> stop{false};
   std::mutex mu; std::vector<Msg> inbox;  // host → worker
   v8::Isolate* iso = nullptr;
@@ -111,7 +118,7 @@ void wOnMessage(const v8::FunctionCallbackInfo<v8::Value>& a) { auto* wc = (Work
 void wSetTimer(const v8::FunctionCallbackInfo<v8::Value>& a) {
   auto* wc = (WorkerCtx*)externalValue(a.Data()); v8::Isolate* iso = a.GetIsolate(); if (!a[2]->IsFunction()) return bind::throwType(iso, "setTimer(ms, repeat, fn)");
   auto fn = std::make_shared<v8::Global<v8::Function>>(iso, a[2].As<v8::Function>());
-  uint32_t id = wc->w->loop.setTimer(bind::num(a, 0), bind::boolean(a, 1), [iso, fn, wc] { v8::HandleScope hs(iso); v8::Local<v8::Context> c = wc->ctx.Get(iso); v8::Context::Scope cs(c); v8::TryCatch tc(iso); (void)fn->Get(iso)->Call(c, c->Global(), 0, nullptr); if (tc.HasCaught()) errorToHost(wc->w->id, Engine::toStdString(iso, tc.Exception())); iso->PerformMicrotaskCheckpoint(); });
+  uint32_t id = wc->w->loop.setTimer(bind::num(a, 0), bind::boolean(a, 1), [iso, fn, wc] { v8::HandleScope hs(iso); v8::Local<v8::Context> c = wc->ctx.Get(iso); v8::Context::Scope cs(c); v8::TryCatch tc(iso); (void)fn->Get(iso)->Call(c, c->Global(), 0, nullptr); if (tc.HasCaught() && !tc.HasTerminated()) errorToHost(wc->w->id, Engine::toStdString(iso, tc.Exception())); iso->PerformMicrotaskCheckpoint(); });
   a.GetReturnValue().Set(id);
 }
 void wClearTimer(const v8::FunctionCallbackInfo<v8::Value>& a) { auto* wc = (WorkerCtx*)externalValue(a.Data()); wc->w->loop.clearTimer(bind::u32(a, 0)); }
@@ -163,15 +170,33 @@ void Worker::run() {
     bind::fn(ctx, n, "postMessage", wPostMessage, ext); bind::fn(ctx, n, "onMessage", wOnMessage, ext); bind::fn(ctx, n, "setTimer", wSetTimer, ext); bind::fn(ctx, n, "clearTimer", wClearTimer, ext);
     bind::fn(ctx, n, "now", wNow); bind::fn(ctx, n, "log", wLog); bind::fn(ctx, n, "assetRead", wAssetRead); bind::fn(ctx, n, "assetMime", wAssetMime); bind::fn(ctx, n, "close", wClose, ext); bind::fn(ctx, n, "fetch", wFetch, ext);
     bind::setStr(ctx, n, "url", url); bind::setStr(ctx, n, "origin", g_svc->config->at("web").s("origin", "https://app.local")); bind::setStr(ctx, n, "userAgent", "webxr-host worker");
+    if (hasInit) { v8::Local<v8::Value> v; if (deserialize(iso, ctx, init).ToLocal(&v)) bind::set(ctx, n, "init", v); init = Msg(); }
     installWasmInterp(ctx, n, *g_svc);
+#ifdef HOST_V8_INTL
+    intl::install(ctx, n);  // the locale navigator.language names (host.json js.intl)
+#endif
+#ifdef HOST_HAS_STORAGE
+    installStorage(ctx, n, *g_svc);  // IndexedDB + Cache API in workers too (WP-26; nothing unless host.json storage asks)
+#endif
     ctx->Global()->Set(ctx, bind::str(iso, "__native"), n).Check();
-    // The worker prelude (bundled into assets/host-worker.js by runtime/build.mjs) then the user script.
-    std::string prelude; if (!g_svc->assets->read("host-worker.js", prelude)) HOST_LOGW("assets/host-worker.js missing");
+    // The worker prelude (bundled into assets/host-worker.js by runtime/build.mjs, or the flavour spawn named) then the user script.
+    std::string preludeSrc; if (!g_svc->assets->read(prelude, preludeSrc)) HOST_LOGW("assets/%s missing", prelude.c_str());
     v8::TryCatch tc(iso);
     auto runClassic = [&](const std::string& src, const std::string& name) { v8::ScriptOrigin o = HOST_SCRIPT_ORIGIN(iso, bind::str(iso, name)); v8::Local<v8::Script> s; if (v8::Script::Compile(ctx, bind::str(iso, src), &o).ToLocal(&s)) (void)s->Run(ctx); };
-    if (!prelude.empty()) runClassic(prelude, "host-worker.js");
+    if (!preludeSrc.empty()) runClassic(preludeSrc, prelude);
+    // Module workers read import.meta.url (Havok locates its wasm beside the worker script).
+    iso->SetHostInitializeImportMetaObjectCallback([](v8::Local<v8::Context> ctx, v8::Local<v8::Module> m, v8::Local<v8::Object> meta) {
+      v8::Isolate* i = isolateOf(ctx); std::string found = t_mods ? t_mods->origin + "/" : "";
+      if (t_mods) for (auto& e : t_mods->mods) if (e.second.Get(i) == m) { found = e.first; break; }
+      bind::setStr(ctx, meta, "url", found); bind::set(ctx, meta, "env", v8::Object::New(i));
+    });
     if (isModule) {
-      v8::Local<v8::Module> m; if (workerLoadModule(iso, ctx, url, &source).ToLocal(&m) && m->InstantiateModule(ctx, workerResolve).FromMaybe(false)) (void)m->Evaluate(ctx);
+      v8::Local<v8::Module> m; v8::Local<v8::Value> done;
+      if (workerLoadModule(iso, ctx, url, &source).ToLocal(&m) && m->InstantiateModule(ctx, workerResolve).FromMaybe(false) && m->Evaluate(ctx).ToLocal(&done) && done->IsPromise()) {
+        // A module's evaluation error rejects the promise Evaluate returns instead of throwing: report it as a classic script's.
+        iso->PerformMicrotaskCheckpoint(); auto p = done.As<v8::Promise>();
+        if (p->State() == v8::Promise::kRejected) errorToHost(id, Engine::toStdString(iso, p->Result()));
+      }
     } else runClassic(source, url);
     if (tc.HasCaught()) errorToHost(id, Engine::toStdString(iso, tc.Exception()));
     iso->PerformMicrotaskCheckpoint();
@@ -198,6 +223,15 @@ constexpr size_t kMaxWorkers = 64;  // each isolate reserves a 4 GB pointer cage
 void spawn(const v8::FunctionCallbackInfo<v8::Value>& a) {
   if (g_workers.size() >= kMaxWorkers) { HOST_LOGE("worker spawn refused: %zu live workers", g_workers.size()); return bind::throwType(a.GetIsolate(), "Worker: too many live workers"); }
   auto w = std::make_unique<Worker>(); w->id = g_nextId++; w->source = bind::string(a, 0); w->url = bind::string(a, 1); w->isModule = bind::boolean(a, 2);
+  if (a.Length() > 3 && a[3]->IsObject()) {  // spawn(source, url, isModule, {prelude, init})
+    v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext(); auto o = a[3].As<v8::Object>(); v8::Local<v8::Value> v;
+    if (o->Get(ctx, bind::str(iso, "prelude")).ToLocal(&v) && v->IsString()) {
+      std::string p = Engine::toStdString(iso, v);  // one of the runtime's own bundles at the assets root, nothing else
+      if (p.rfind("host-", 0) != 0 || p.size() < 9 || p.compare(p.size() - 3, 3, ".js") != 0 || p.find_first_of("/\\") != std::string::npos) return bind::throwType(iso, "Worker: bad prelude");
+      w->prelude = p;
+    }
+    if (o->Get(ctx, bind::str(iso, "init")).ToLocal(&v) && !v->IsUndefined()) { if (!serialize(iso, ctx, v, v8::Undefined(iso), w->init)) return; w->hasInit = true; }
+  }
   Worker* raw = w.get(); raw->thread = std::thread([raw] { raw->run(); });
   int id = w->id; g_workers[id] = std::move(w); a.GetReturnValue().Set(id); HOST_LOGI("worker %d spawned (%s, %zu bytes)", id, raw->url.c_str(), raw->source.size());
 }
@@ -212,6 +246,21 @@ void terminate(const v8::FunctionCallbackInfo<v8::Value>& a) {
 }
 void onMessage(const v8::FunctionCallbackInfo<v8::Value>& a) { if (a[0]->IsFunction()) g_onMessage.Reset(a.GetIsolate(), a[0].As<v8::Function>()); }
 void onError(const v8::FunctionCallbackInfo<v8::Value>& a) { if (a[0]->IsFunction()) g_onError.Reset(a.GetIsolate(), a[0].As<v8::Function>()); }
+
+// ---- __native.worker.registry (WP-27, host.json web.serviceWorker): the service-worker registrations, one small JSON
+// file in the app's files dir that the runtime reads at start and rewrites when a registration changes (never per frame).
+std::string registryPath() { return g_svc->filesDir + "/service-workers.json"; }
+void registryLoad(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  std::ifstream f(fsPath(registryPath()), std::ios::binary); if (!f) { a.GetReturnValue().SetNull(); return; }
+  std::stringstream ss; ss << f.rdbuf(); a.GetReturnValue().Set(bind::str(a.GetIsolate(), ss.str()));
+}
+void registrySave(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  std::string text = bind::string(a, 0), path = registryPath(), tmp = path + ".tmp";
+  { std::ofstream f(fsPath(tmp), std::ios::binary | std::ios::trunc); f << text; if (!f) { HOST_LOGW("service workers: cannot write %s", tmp.c_str()); a.GetReturnValue().Set(false); return; } }
+  std::error_code ec; std::filesystem::rename(fsPath(tmp), fsPath(path), ec);  // replaces the old file atomically
+  if (ec) HOST_LOGW("service workers: save failed: %s", ec.message().c_str());
+  a.GetReturnValue().Set(!ec);
+}
 }  // namespace
 
 void shutdownWorkers() {
@@ -223,6 +272,7 @@ void shutdownWorkers() {
 void installWorkers(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc) {
   g_svc = &svc; v8::Local<v8::Object> w = bind::obj(ctx, native, "worker");
   bind::fn(ctx, w, "spawn", spawn); bind::fn(ctx, w, "post", post); bind::fn(ctx, w, "terminate", terminate); bind::fn(ctx, w, "onMessage", onMessage); bind::fn(ctx, w, "onError", onError);
+  if (svc.config->at("web").bo("serviceWorker", false)) { v8::Local<v8::Object> r = bind::obj(ctx, w, "registry"); bind::fn(ctx, r, "load", registryLoad); bind::fn(ctx, r, "save", registrySave); }
 }
 
 }  // namespace host

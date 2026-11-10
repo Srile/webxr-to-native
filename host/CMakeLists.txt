@@ -8,7 +8,35 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(TP ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 option(HOST_TESTS "Build host-side unit tests (no Android)" OFF)
 option(HOST_WEBRTC "WebSocket + WebRTC data channels (host.json network.webrtc, WP-21)" OFF)
+option(HOST_V8_INTL "Android: V8 with ICU (third_party/v8-intl) for Intl (host.json js.intl, WP-24)" OFF)
 include(${CMAKE_CURRENT_SOURCE_DIR}/webrtc.cmake)
+option(HOST_MICROPHONE "Microphone capture: getUserMedia, MediaStreamAudioSourceNode (host.json media.microphone, WP-25)" OFF)
+include(${CMAKE_CURRENT_SOURCE_DIR}/microphone.cmake)
+option(HOST_STORAGE "IndexedDB + Cache API over SQLite (host.json storage.indexedDB / storage.cache, WP-26)" OFF)
+include(${CMAKE_CURRENT_SOURCE_DIR}/storage.cmake)
+
+# Canvas 2D text (stb_truetype, img/text.cpp) and SVG images (nanosvg, img/decode.cpp): host.json web.canvasText and
+# web.svg. An APK carries them only when its game asks (tools/pack.mjs passes the switches to Gradle); the desktop
+# hosts are one binary for every game, so they build both in and the game's host.json decides at run time
+# (host/img/image_bind.cpp registers the text binding and accepts SVG only when the switch is on).
+if(ANDROID)
+  set(HOST_WEB_FEATURE_DEFAULT OFF)
+else()
+  set(HOST_WEB_FEATURE_DEFAULT ON)
+endif()
+option(HOST_CANVAS_TEXT "Canvas 2D text through stb_truetype (host.json web.canvasText)" ${HOST_WEB_FEATURE_DEFAULT})
+option(HOST_SVG "SVG images through nanosvg (host.json web.svg)" ${HOST_WEB_FEATURE_DEFAULT})
+add_library(host_web_features INTERFACE)
+if(HOST_CANVAS_TEXT)
+  target_compile_definitions(host_web_features INTERFACE HOST_HAS_CANVAS_TEXT)
+endif()
+if(HOST_SVG)
+  if(NOT EXISTS ${TP}/nanosvg/nanosvg.h)
+    message(FATAL_ERROR "HOST_SVG: third_party/nanosvg is missing; run tools/setup.sh")
+  endif()
+  target_compile_definitions(host_web_features INTERFACE HOST_HAS_SVG)
+  target_include_directories(host_web_features INTERFACE ${TP}/nanosvg)
+endif()
 
 # WebP decoding (the game's logos are .webp): libwebp from source, decoder target only.
 if(EXISTS ${TP}/libwebp/CMakeLists.txt)
@@ -57,14 +85,32 @@ if(ANDROID)
   # V8 14.9 as a static monolith (tools/setup.sh: NativeScript/v8-buildscripts), linked into libwebxrhost.so so the
   # one native library is 16 KB aligned. The defines must match its build (pointer compression, 31-bit smis, no
   # sandbox); V8::Initialize checks them. Its symbols stay out of our export table (--exclude-libs).
+  # HOST_V8_INTL (host.json js.intl, WP-24): the same V8 built with ICU and its data compiled in
+  # (tools/setup-v8-android-intl.sh → third_party/v8-intl: the stock build's gn args and patches, i18n on), and
+  # js/intl.cpp, which sets ICU's default locale and zone. Without it nothing of ICU is linked.
   add_library(v8 STATIC IMPORTED)
-  set_target_properties(v8 PROPERTIES IMPORTED_LOCATION ${TP}/v8/lib/${ANDROID_ABI}/libv8_monolith.a
-    INTERFACE_INCLUDE_DIRECTORIES ${TP}/v8/include)
+  if(HOST_V8_INTL)
+    if(NOT EXISTS ${TP}/v8-intl/lib/libv8_monolith.a)
+      message(FATAL_ERROR "HOST_V8_INTL: no ${TP}/v8-intl/lib/libv8_monolith.a; run tools/setup-v8-android-intl.sh (the published build) or tools/setup-v8-android-intl.sh --build")
+    endif()
+    set_target_properties(v8 PROPERTIES IMPORTED_LOCATION ${TP}/v8-intl/lib/libv8_monolith.a
+      INTERFACE_INCLUDE_DIRECTORIES ${TP}/v8-intl/include)
+    # ICU's public macros as the archive's ICU was compiled with (U_USING_ICU_NAMESPACE=0 and the like), from the build.
+    file(STRINGS ${TP}/v8-intl/icu-defines.txt V8_INTL_ICU_DEFINES)
+    target_compile_definitions(v8 INTERFACE HOST_V8_INTL ${V8_INTL_ICU_DEFINES})
+    message(STATUS "V8: third_party/v8-intl (ICU) for Intl")
+  else()
+    set_target_properties(v8 PROPERTIES IMPORTED_LOCATION ${TP}/v8/lib/${ANDROID_ABI}/libv8_monolith.a
+      INTERFACE_INCLUDE_DIRECTORIES ${TP}/v8/include)
+  endif()
   target_compile_definitions(v8 INTERFACE V8_COMPRESS_POINTERS V8_31BIT_SMIS_ON_64BIT_ARCH)
 
   # Relative paths, so the filter sees only the source tree (a checkout under some ".../mac/..." must not match).
   file(GLOB_RECURSE HOST_SOURCES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-  list(FILTER HOST_SOURCES EXCLUDE REGEX "^(tests|emu|mac|win|ios|linux)/|^net/http_curl\\.cpp$")  # the experimental hosts' own sources
+  list(FILTER HOST_SOURCES EXCLUDE REGEX "^(tests|emu|mac|win|ios|linux|media|storage)/|^net/http_curl\\.cpp$")  # the experimental hosts' own sources; media/: HOST_MICROPHONE; storage/: HOST_STORAGE
+  if(NOT HOST_CANVAS_TEXT)
+    list(FILTER HOST_SOURCES EXCLUDE REGEX "^img/text\\.cpp$")
+  endif()
   add_library(webxrhost SHARED ${HOST_SOURCES})
   target_include_directories(webxrhost PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs)
   target_compile_definitions(webxrhost PRIVATE XR_USE_PLATFORM_ANDROID XR_USE_GRAPHICS_API_OPENGL_ES)
@@ -81,9 +127,15 @@ if(ANDROID)
   # WP-08: Oboe (AAudio) for the WebAudio device stream. Its cmake_minimum_required(3.4.1) predates CMake 4's floor.
   set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
   add_subdirectory(${TP}/oboe oboe)
-  target_link_libraries(webxrhost native_app_glue openxr_loader v8 android log EGL GLESv3 oboe host_webp host_opus)
+  target_link_libraries(webxrhost native_app_glue openxr_loader v8 android log EGL GLESv3 oboe host_webp host_opus host_web_features)
   if(HOST_WEBRTC)
     host_enable_webrtc(webxrhost)
+  endif()
+  if(HOST_MICROPHONE)
+    host_enable_microphone(webxrhost)
+  endif()
+  if(HOST_STORAGE)
+    host_enable_storage(webxrhost)
   endif()
 endif()
 
@@ -100,6 +152,9 @@ if(NOT ANDROID AND NOT HOST_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/net/assets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/net/http_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/emu/host_emu.cpp ${CMAKE_CURRENT_SOURCE_DIR}/emu/emu_xr.cpp ${CMAKE_CURRENT_SOURCE_DIR}/emu/splash.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/rtc/rtc_bind.cpp)
+  if(NOT HOST_CANVAS_TEXT)
+    list(FILTER EMU_SOURCES EXCLUDE REGEX "/img/text\\.cpp$")
+  endif()
   # Khronos EGL/GLES headers: the NDK's, only those directories of its sysroot (the rest is Android's libc).
   if(CMAKE_HOST_WIN32)
     set(NDK_HOST_TAG windows-x86_64)
@@ -158,10 +213,16 @@ if(APPLE AND NOT IOS AND NOT CMAKE_SYSTEM_NAME STREQUAL "visionOS" AND NOT HOST_
   target_compile_options(webxrhost-mac PRIVATE -Wall -Wno-unused-parameter -Wno-missing-field-initializers -Wno-unused-private-field -fno-exceptions -fno-rtti)  # V8 is built without RTTI
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/mac/main.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
   find_library(CURL curl REQUIRED)
-  target_link_libraries(webxrhost-mac v8 v8_platform angle_egl angle_gles glfw host_webp host_opus ${CURL} ${HOST_WAMR}
+  target_link_libraries(webxrhost-mac v8 v8_platform angle_egl angle_gles glfw host_webp host_opus host_web_features ${CURL} ${HOST_WAMR}
     "-framework Cocoa" "-framework QuartzCore" "-framework AudioToolbox" "-framework CoreAudio")
   if(HOST_WEBRTC)
     host_enable_webrtc(webxrhost-mac)
+  endif()
+  if(HOST_MICROPHONE)
+    host_enable_microphone(webxrhost-mac)
+  endif()
+  if(HOST_STORAGE)
+    host_enable_storage(webxrhost-mac)
   endif()
   # ANGLE is loaded from next to the executable (tools/setup-mac.sh rewrites its install names to @rpath).
   set_target_properties(webxrhost-mac PROPERTIES BUILD_RPATH "${ANGLE_DIR};${V8_PREFIX}/lib;${V8_PREFIX}/libexec")
@@ -215,9 +276,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT HOST_TESTS)
   # GCC's -Wall adds warnings clang (every other host's compiler) does not: one-line ifs, V8's [[nodiscard]] Maybe.
   target_compile_options(webxrhost-linux PRIVATE -Wall -Wno-unused-parameter -Wno-missing-field-initializers -fno-exceptions -fno-rtti
     $<$<CXX_COMPILER_ID:GNU>:-Wno-misleading-indentation -Wno-unused-result -Wno-maybe-uninitialized> $<$<CXX_COMPILER_ID:Clang>:-Wno-unused-private-field>)
-  target_link_libraries(webxrhost-linux v8 v8_platform linux_gl PkgConfig::LINUX_SYS host_webp host_opus ${HOST_WAMR} Threads::Threads ${CMAKE_DL_LIBS})
+  target_link_libraries(webxrhost-linux v8 v8_platform linux_gl PkgConfig::LINUX_SYS host_webp host_opus host_web_features ${HOST_WAMR} Threads::Threads ${CMAKE_DL_LIBS})
   if(HOST_WEBRTC)
     host_enable_webrtc(webxrhost-linux)
+  endif()
+  if(HOST_MICROPHONE)
+    host_enable_microphone(webxrhost-linux)
+  endif()
+  if(HOST_STORAGE)
+    host_enable_storage(webxrhost-linux)
   endif()
   # The bottle is a component build: libv8 needs libv8_libbase, absl, icu, zlib and partition_alloc, which live in
   # libexec/ (lib/ links only the three public ones) and carry no RUNPATH of their own. An old-style DT_RPATH
@@ -247,9 +314,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT HOST_TESTS)
     target_compile_options(webxrhost-linux-xr PRIVATE ${_opts})
     get_target_property(_lopts webxrhost-linux LINK_OPTIONS)
     target_link_options(webxrhost-linux-xr PRIVATE ${_lopts})
-    target_link_libraries(webxrhost-linux-xr v8 v8_platform linux_gl PkgConfig::LINUX_SYS PkgConfig::OPENXR host_webp host_opus ${HOST_WAMR} Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(webxrhost-linux-xr v8 v8_platform linux_gl PkgConfig::LINUX_SYS PkgConfig::OPENXR host_webp host_opus host_web_features ${HOST_WAMR} Threads::Threads ${CMAKE_DL_LIBS})
     if(HOST_WEBRTC)
       host_enable_webrtc(webxrhost-linux-xr)
+    endif()
+    if(HOST_MICROPHONE)
+      host_enable_microphone(webxrhost-linux-xr)
+    endif()
+    if(HOST_STORAGE)
+      host_enable_storage(webxrhost-linux-xr)
     endif()
     get_target_property(_rpath webxrhost-linux BUILD_RPATH)
     set_target_properties(webxrhost-linux-xr PROPERTIES BUILD_RPATH "${_rpath}")
@@ -279,7 +352,7 @@ if(WIN32 AND NOT HOST_TESTS)
   string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   string(REPLACE "/GR" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   target_compile_options(webxrhost-win PRIVATE /GR- /utf-8 $<$<CXX_COMPILER_ID:Clang>:-Wno-unused-parameter -Wno-missing-field-initializers -Wno-unused-private-field -Wno-microsoft-cast>)
-  target_link_libraries(webxrhost-win v8 host_webp host_opus ${ANGLE_WIN}/lib/libEGL.lib ${ANGLE_WIN}/lib/libGLESv2.lib ${GLFW_WIN}/lib/glfw3.lib
+  target_link_libraries(webxrhost-win v8 host_webp host_opus host_web_features ${ANGLE_WIN}/lib/libEGL.lib ${ANGLE_WIN}/lib/libGLESv2.lib ${GLFW_WIN}/lib/glfw3.lib
     ws2_32 winhttp ole32 winmm shell32 user32 gdi32 dbghelp shlwapi)
   if(NOT HOST_WIN_CONSOLE)
     target_link_options(webxrhost-win PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
@@ -420,7 +493,7 @@ if((IOS OR CMAKE_SYSTEM_NAME STREQUAL "visionOS") AND NOT HOST_TESTS)
   if(NOT HOST_WAMR)
     message(FATAL_ERROR "the ${HOST_APPLE} host needs WAMR for WebAssembly: run tools/setup-ios.sh")
   endif()
-  target_link_libraries(${HOST_APPLE_TARGET} v8 host_webp host_opus ${HOST_WAMR} "-framework UIKit" "-framework QuartzCore" "-framework CoreGraphics"
+  target_link_libraries(${HOST_APPLE_TARGET} v8 host_webp host_opus host_web_features ${HOST_WAMR} "-framework UIKit" "-framework QuartzCore" "-framework CoreGraphics"
     "-framework AudioToolbox" "-framework AVFoundation" "-framework GameController" "-framework Foundation")
   if(HOST_IOS_GL STREQUAL "angle")
     target_compile_definitions(${HOST_APPLE_TARGET} PRIVATE HOST_IOS_ANGLE GL_GLEXT_PROTOTYPES EGL_EGLEXT_PROTOTYPES)
@@ -441,7 +514,7 @@ if(HOST_TESTS)
   add_executable(loop_test tests/loop_test.cpp core/loop.cpp)
   target_include_directories(loop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   # WP-08: the audio graph's DSP, rendered offline on the Mac.
-  add_executable(audio_test tests/audio_test.cpp audio/graph.cpp audio/context.cpp audio/offline.cpp audio/decode.cpp audio/webm.cpp audio/mp3.cpp)
+  add_executable(audio_test tests/audio_test.cpp audio/graph.cpp audio/analyser.cpp audio/context.cpp audio/offline.cpp audio/decode.cpp audio/webm.cpp audio/mp3.cpp)
   target_include_directories(audio_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs)
   find_package(Threads REQUIRED)
   target_link_libraries(audio_test Threads::Threads host_opus)
@@ -453,5 +526,12 @@ if(HOST_TESTS)
   target_link_libraries(gl_queue_test Threads::Threads)
   add_executable(image_test tests/image_test.cpp img/decode.cpp)
   target_include_directories(image_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb)
-  target_link_libraries(image_test host_webp)
+  target_link_libraries(image_test host_webp host_web_features)
+  # WP-26: the SQLite store under IndexedDB and the Cache API (no V8), when tools/setup-storage.sh has fetched SQLite.
+  if(EXISTS ${TP}/sqlite/sqlite3.c)
+    host_sqlite_library()
+    add_executable(storage_test tests/storage_test.cpp storage/kv.cpp)
+    target_include_directories(storage_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(storage_test host_sqlite Threads::Threads ${CMAKE_DL_LIBS})
+  endif()
 endif()

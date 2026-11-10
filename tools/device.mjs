@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const local = join(root, 'tools/sdk/android/platform-tools/adb')
+const local = join(root, 'tools/sdk/android/platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb')
 const ADB = existsSync(local) ? local : 'adb'
 const adb = (args, opts = {}) => execFileSync(ADB, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts })
 const sh = (cmd) => adb(['shell', cmd]).trim()

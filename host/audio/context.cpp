@@ -10,6 +10,7 @@ ContextBase::~ContextBase() {}
 void ContextBase::initDestination() {
   allocSlot();  // slot 0
   Command c; c.op = Op::CreateNode; c.a = 0; c.kind = (uint8_t)Kind::Destination; issue(c);
+  kinds_.assign(1, Kind::Destination);
   nextSlot_ = 1;
 }
 
@@ -33,6 +34,8 @@ uint32_t ContextBase::createNode(Kind kind) {
   if (slot == NONE) return NONE;
   Command c; c.op = Op::CreateNode; c.a = slot; c.kind = (uint8_t)kind;
   if (!issue(c)) { free_.push_back(slot); return NONE; }
+  if (slot >= kinds_.size()) kinds_.resize(slot + 1, Kind::None);
+  kinds_[slot] = kind;
   return slot;
 }
 
@@ -41,8 +44,9 @@ void ContextBase::drain(const std::function<void(const Msg&)>& on) {
   while (graph_->msgs().pop(m)) {
     switch (m.type) {
       case Msg::Ended: on(m); break;
-      case Msg::Freed: if (m.slot != 0) free_.push_back(m.slot); on(m); break;
+      case Msg::Freed: if (m.slot != 0) { free_.push_back(m.slot); if (m.slot < kinds_.size()) kinds_[m.slot] = Kind::None; } on(m); break;
       case Msg::ReleaseBuffer: if (m.ptr) ((AudioBufferData*)m.ptr)->unref(); break;
+      case Msg::ReleaseExt: if (m.ptr) ((Shared*)m.ptr)->unref(); break;
     }
   }
 }

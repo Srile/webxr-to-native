@@ -10,7 +10,7 @@ function fakeGL() {
     FRAMEBUFFER: 0x8D40, FRAMEBUFFER_BINDING: 0x8CA6, COLOR_ATTACHMENT0: 0x8CE0, TEXTURE_2D: 0x0DE1,
     RENDERBUFFER: 0x8D41, DEPTH_ATTACHMENT: 0x8D00, DEPTH_STENCIL_ATTACHMENT: 0x821A, RGBA8: 0x8058, DEPTH24_STENCIL8: 0x88F0,
     calls,
-    createFramebuffer() { return { fbo: calls.length } },
+    createFramebuffer() { return { fbo: calls.length, _name: 100 + calls.length } },
     createRenderbuffer() { return { rb: true } },
     getParameter(p) { calls.push(['getParameter', p]); return bound },
     bindFramebuffer(t, f) { calls.push(['bindFramebuffer', f]); bound = f },
@@ -218,6 +218,83 @@ test('layers from another session are refused by updateRenderState and the bindi
   assert.throws(() => new h.g.XRWebGLLayer(s, gl), { name: 'InvalidStateError' })
   assert.equal(h.g.XRWebGLLayer.getNativeFramebufferScaleFactor(s), 0)
 })
+
+test('XRWebGLLayer: without xr.clearFrame the page gets the framebuffer as it is (no clear, no state queries)', async () => {
+  const h = harness({}, { beginResult: { width: 3360, height: 1760, rates: [72], rate: 72, hasStage: false, stageWidth: 0, stageDepth: 0, hands: false } })
+  const s = await h.session()
+  const gl = fakeGL()
+  gl.clear = (m) => gl.calls.push(['clear', m])
+  const layer = new h.g.XRWebGLLayer(s, gl, { depth: true })
+  s.updateRenderState({ baseLayer: layer })
+  s.requestAnimationFrame(() => gl.calls.push(['draw']))
+  h.tick()
+  // beginFrame's one FRAMEBUFFER_BINDING query is the attach's binding save, not a clear
+  assert.ok(!gl.calls.some((c) => c[0] === 'clear' || (c[0] === 'getParameter' && c[1] !== gl.FRAMEBUFFER_BINDING)))
+  assert.ok(gl.calls.some((c) => c[0] === 'draw'))
+})
+
+test('XRWebGLLayer with xr.clearFrame: the host clears the layer framebuffer each frame, one queued call, alpha 0 for an alpha layer and 1 for an opaque one', async () => {
+  const h = harness({ clearFrame: true }, { beginResult: { width: 3360, height: 1760, rates: [72], rate: 72, hasStage: false, stageWidth: 0, stageDepth: 0, hands: false } })
+  const s = await h.session()
+  const gl = fakeGL()
+  gl._n = { clearFrame: (fbo, mask, alpha) => gl.calls.push(['clearFrame', fbo, mask, alpha]) }
+  const layer = new h.g.XRWebGLLayer(s, gl, { depth: true, stencil: true })
+  s.updateRenderState({ baseLayer: layer })
+  s.requestAnimationFrame(() => gl.calls.push(['draw']))
+  h.tick()
+  const clear = gl.calls.find((c) => c[0] === 'clearFrame')
+  assert.ok(clear)
+  assert.equal(clear[1], layer.framebuffer._name)
+  assert.equal(clear[2], 0x4000 | 0x100 | 0x400)
+  assert.equal(clear[3], 0)
+  assert.ok(gl.calls.findIndex((c) => c[0] === 'clearFrame') < gl.calls.findIndex((c) => c[0] === 'draw'))
+  assert.ok(!gl.calls.some((c) => c[0] === 'getParameter' && c[1] !== gl.FRAMEBUFFER_BINDING), 'no clear state read back on the JS thread')
+  // the same image two frames running still clears each frame
+  gl.calls.length = 0
+  h.tick()
+  assert.equal(gl.calls.filter((c) => c[0] === 'clearFrame').length, 1)
+  const opaque = new h.g.XRWebGLLayer(s, gl, { depth: false, alpha: false })
+  s.updateRenderState({ baseLayer: opaque })
+  gl.calls.length = 0
+  h.tick()
+  const c2 = gl.calls.find((c) => c[0] === 'clearFrame')
+  assert.equal(c2[2], 0x4000)
+  assert.equal(c2[3], 1)
+})
+
+test('XRWebGLLayer with xr.clearFrame, no host clearFrame: the page\'s own calls clear colour and depth before it draws, state restored', async () => {
+  const h = harness({ clearFrame: true }, { beginResult: { width: 3360, height: 1760, rates: [72], rate: 72, hasStage: false, stageWidth: 0, stageDepth: 0, hands: false } })
+  const s = await h.session()
+  const gl = fakeGL()
+  gl.COLOR_BUFFER_BIT = 0x4000; gl.DEPTH_BUFFER_BIT = 0x100; gl.STENCIL_BUFFER_BIT = 0x400
+  gl.COLOR_CLEAR_VALUE = 1; gl.DEPTH_CLEAR_VALUE = 2; gl.STENCIL_CLEAR_VALUE = 3; gl.COLOR_WRITEMASK = 4; gl.DEPTH_WRITEMASK = 5
+  gl.SCISSOR_TEST = 6
+  const params = { 1: new Float32Array([0.2, 0.3, 0.4, 1]), 2: 0.5, 3: 7, 4: [true, true, true, false], 5: false }
+  gl.getParameter = (p) => { gl.calls.push(['getParameter', p]); return p === gl.FRAMEBUFFER_BINDING ? null : params[p] }
+  gl.isEnabled = () => false
+  gl.clearColor = (r, g, b, a) => gl.calls.push(['clearColor', r, g, b, a])
+  gl.clearDepth = (d) => gl.calls.push(['clearDepth', d])
+  gl.clearStencil = (v) => gl.calls.push(['clearStencil', v])
+  gl.colorMask = (r, g, b, a) => gl.calls.push(['colorMask', r, g, b, a])
+  gl.depthMask = (v) => gl.calls.push(['depthMask', v])
+  gl.clear = (m) => gl.calls.push(['clear', m])
+  gl.disable = (c) => gl.calls.push(['disable', c])
+  gl.enable = (c) => gl.calls.push(['enable', c])
+  const layer = new h.g.XRWebGLLayer(s, gl, { depth: true })
+  s.updateRenderState({ baseLayer: layer })
+  let drew = false
+  s.requestAnimationFrame(() => { drew = gl.calls.some((c) => c[0] === 'clear'); gl.calls.push(['draw']) })
+  h.tick()
+  const clear = gl.calls.find((c) => c[0] === 'clear')
+  assert.equal(clear[1], 0x4000 | 0x100)
+  assert.ok(gl.calls.findIndex((c) => c[0] === 'clear') < gl.calls.findIndex((c) => c[0] === 'draw'))
+  assert.equal(drew, true)
+  const restored = gl.calls.filter((c) => c[0] === 'clearColor').at(-1)
+  assert.ok(Math.abs(restored[1] - 0.2) < 1e-6 && Math.abs(restored[2] - 0.3) < 1e-6 && restored[4] === 1)
+  assert.equal(gl.calls.find((c) => c[0] === 'clearDepth')[1], 1)
+  assert.equal(gl.calls.find((c) => c[0] === 'clearColor')[4], 0, 'an alpha layer clears to transparent black')
+})
+
 
 test('XRWebGLLayer fallback: depth is invalidated at frame end (after the draws, binding restored); colour never', async () => {
   const h = harness({}, { beginResult: { width: 3360, height: 1760, rates: [72], rate: 72, hasStage: true, stageWidth: 2, stageDepth: 2, hands: false } })

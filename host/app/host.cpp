@@ -10,6 +10,7 @@
 #include "gl/gl_queue.h"
 #include "gl/webgl_bind.h"
 #include "js/dom_input.h"
+#include "js/intl.h"
 #include <android/configuration.h>
 #include <android/input.h>
 #include <android/keycodes.h>
@@ -31,6 +32,19 @@
 namespace host {
 
 static const char* kScenePermission = "com.oculus.permission.USE_SCENE";
+
+#ifdef HOST_V8_INTL
+// Intl (host.json js.intl, WP-24): ICU's defaults from the system's locale (the activity's configuration: the user's
+// first language, or the app's own on Android 13+) and time zone (persist.sys.timezone, the property bionic's
+// localtime reads; an app has no TZ), before the isolate exists (js/intl.h).
+static void startIntl(AConfiguration* config) {
+  char lang[3] = {}, country[3] = {};
+  if (config) { AConfiguration_getLanguage(config, lang); AConfiguration_getCountry(config, country); }
+  std::string tag = lang; if (!tag.empty() && country[0]) tag += std::string("-") + country;
+  char zone[PROP_VALUE_MAX] = {}; __system_property_get("persist.sys.timezone", zone);
+  intl::init(tag, zone);
+}
+#endif
 
 // Pipelined XR frames (gl.pipeline): the GL thread's half of a frame, recorded as two commands around the page's.
 // The frame it begins and ends lives here (GL thread only); the host thread has moved on to the next one by then.
@@ -131,6 +145,9 @@ bool Host::startJs() {
     xr_.beforeSessionEnd = [] { glq::finish(); };
     HOST_LOGI("xr frames %s", pipeline_ ? "pipelined: the page records frame N+1 while the GL thread submits frame N" : "synchronous with the GL thread");
   }
+#ifdef HOST_V8_INTL
+  startIntl(app_->config);
+#endif
   if (!Engine::initPlatform(std::move(snapshot), GcScheduler::v8Flags(gcCfg_))) return false;
   { v8::ResourceConstraints rc; GcScheduler::constrain(gcCfg_, rc); if (!engine_.create(gcCfg_.enabled ? &rc : nullptr)) return false; }
   jsUp_ = true;
@@ -157,7 +174,16 @@ bool Host::startJs() {
   bool ok = engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) {
     installConsole(ctx, [this](int level, const std::string& m) { bridgeLog(m); if (inspector_) inspector_->consoleMessage(level, m); });
     v8::Local<v8::Object> native = installNativeCore(ctx, svc_);
+#ifdef HOST_HAS_MICROPHONE
+    installMedia(ctx, native, svc_);  // host.json media.microphone (WP-25); before installAudio, which binds its tracks
+#endif
     installWebGL(ctx, native, svc_); installImages(ctx, native, svc_); installAudio(ctx, native, svc_); installXr(ctx, native, svc_); installWorkers(ctx, native, svc_); installPlatform(ctx, native, svc_); installRtc(ctx, native, svc_);
+#ifdef HOST_V8_INTL
+    intl::install(ctx, native);
+#endif
+#ifdef HOST_HAS_STORAGE
+    installStorage(ctx, native, svc_);  // host.json storage.indexedDB / storage.cache (WP-26)
+#endif
   });
   if (!ok) return false;
   bridge_.engine = &engine_;
@@ -385,17 +411,24 @@ void Host::xrTickPipelined() {
   stats(&f);
 }
 
-void Host::xrTick() {
-  if (xr_.state() != lastState_) {
-    lastState_ = xr_.state();
-    // A refresh-rate request made before the session is FOCUSED can be dropped by the runtime: ask again on focus.
-    if (lastState_ == XR_SESSION_STATE_FOCUSED) { double want = config_.at("xr").n("preferredRate", 0); if (want > 0 && std::abs(xr_.refreshRate() - want) > 0.5) xr_.requestRefreshRate((float)want); }
-    // Back from the permission dialog (or the room setup flow): ask for the room again once the permission is there.
-    if (lastState_ == XR_SESSION_STATE_FOCUSED && xr_.scene().sceneActive() && (scenePermissionAsked_ || xr_.scene().queryFailedPermission() || xr_.scene().entities().empty())) {
-      if (hasPermission(svc_.javaVm, svc_.activity, kScenePermission)) { scenePermissionAsked_ = false; xr_.scene().requery(); }
-    }
-    if (jsUp_) { bool vis = lastState_ == XR_SESSION_STATE_VISIBLE || lastState_ == XR_SESSION_STATE_FOCUSED; engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchEvent(iso, ctx, "state", vis, lastState_ == XR_SESSION_STATE_FOCUSED); }); }
+void Host::publishXrState() {
+  if (!xrInstance_ || xr_.state() == lastState_) return;
+  lastState_ = xr_.state();
+  // A refresh-rate request made before the session is FOCUSED can be dropped by the runtime: ask again on focus.
+  if (lastState_ == XR_SESSION_STATE_FOCUSED) { double want = config_.at("xr").n("preferredRate", 0); if (want > 0 && std::abs(xr_.refreshRate() - want) > 0.5) xr_.requestRefreshRate((float)want); }
+  // Back from the permission dialog (or the room setup flow): ask for the room again once the permission is there.
+  if (lastState_ == XR_SESSION_STATE_FOCUSED && xr_.scene().sceneActive() && (scenePermissionAsked_ || xr_.scene().queryFailedPermission() || xr_.scene().entities().empty())) {
+    if (hasPermission(svc_.javaVm, svc_.activity, kScenePermission)) { scenePermissionAsked_ = false; xr_.scene().requery(); }
   }
+  if (!jsUp_) return;
+  // The page's requestSession is waiting on this event to enter VR. It has to arrive while the loop is still
+  // flat: xrTick is what would have sent it, and xrTick does not run until that requestSession has created the
+  // swapchain. Sending it only from there left the headset on its loading screen.
+  bool vis = lastState_ == XR_SESSION_STATE_VISIBLE || lastState_ == XR_SESSION_STATE_FOCUSED;
+  engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchEvent(iso, ctx, "state", vis, lastState_ == XR_SESSION_STATE_FOCUSED); });
+}
+
+void Host::xrTick() {
   if (jsUp_ && xr_.refreshRateChanged()) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchEvent(iso, ctx, "rate", xr_.refreshRate(), 0); });
   if (jsUp_ && xr_.referenceSpaceChanged()) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchEvent(iso, ctx, "reset", 0, 0); });
   { bool ok = false; if (jsUp_ && xr_.scene().captureFinished(ok)) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchEvent(iso, ctx, "scenecapture", ok ? 1 : 0, 0); }); }
@@ -519,7 +552,7 @@ void Host::updateVisibility() {
 
 bool Host::tick() {
   if (exit_) return false;
-  if (xrInstance_) { if (!xr_.pollEvents()) { HOST_LOGI("xr session over"); return false; } }
+  if (xrInstance_) { if (!xr_.pollEvents()) { HOST_LOGI("xr session over"); return false; } publishXrState(); }
   const bool xrRendering = xrInstance_ && xrActive_ && xr_.sessionRunning();
   if (!phone_ && jsUp_) updateVisibility();
   if (xrRendering) xrTick();

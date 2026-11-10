@@ -1,4 +1,4 @@
-// The ONE translation unit that compiles stb_image and stb_image_write.
+// The ONE translation unit that compiles stb_image, stb_image_write and (HOST_HAS_SVG, host.json web.svg) nanosvg.
 #include "img/decode.h"
 #ifdef HOST_HAS_WEBP
 #include <webp/decode.h>
@@ -32,6 +32,15 @@
 #define STBI_WRITE_NO_STDIO
 #include <stb_image_write.h>
 
+#ifdef HOST_HAS_SVG
+#include <cstdio>
+#include <cstring>
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVGRAST_IMPLEMENTATION
+#include <nanosvg.h>
+#include <nanosvgrast.h>
+#endif
+
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -46,6 +55,42 @@ namespace {
 bool isPng(const uint8_t* b, size_t n) { return n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G' && b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A; }
 bool isJpeg(const uint8_t* b, size_t n) { return n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF; }
 bool isWebp(const uint8_t* b, size_t n) { return n >= 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P'; }
+
+}  // namespace
+
+// An SVG document: optional BOM and whitespace, then markup with an <svg element near the start.
+bool isSvg(const uint8_t* b, size_t n) {
+  size_t i = 0;
+  if (n >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) i = 3;
+  while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n')) i++;
+  if (i >= n || b[i] != '<') return false;
+  const size_t end = std::min(n, i + 4096);
+  for (size_t k = i; k + 4 <= end; k++) if (b[k] == '<' && b[k + 1] == 's' && b[k + 2] == 'v' && b[k + 3] == 'g') return true;
+  return false;
+}
+
+namespace {
+
+#ifdef HOST_HAS_SVG
+// Rasterised at its intrinsic size (width/height in CSS px, 96 dpi; the viewBox when they are absent), as a
+// browser sizes an <img> of it. Paths, fills, strokes, gradients, transforms and opacity are drawn; clip paths,
+// masks, filters, text and embedded images are not.
+Image decodeSvg(const uint8_t* bytes, size_t len) {
+  Image out;
+  std::vector<char> text(bytes, bytes + len); text.push_back('\0');  // nsvgParse edits its input in place
+  NSVGimage* svg = nsvgParse(text.data(), "px", 96.0f);
+  if (!svg) { out.error = "decode failed: bad SVG"; return out; }
+  const int w = (int)std::ceil(svg->width), h = (int)std::ceil(svg->height);
+  if (w <= 0 || h <= 0 || w > 8192 || h > 8192) { nsvgDelete(svg); out.error = "decode failed: SVG has no usable size"; return out; }
+  NSVGrasterizer* rast = nsvgCreateRasterizer();
+  if (!rast) { nsvgDelete(svg); out.error = "decode failed: out of memory"; return out; }
+  out.rgba.assign((size_t)w * h * 4, 0);
+  nsvgRasterize(rast, svg, 0, 0, 1.0f, out.rgba.data(), w, h, w * 4);
+  nsvgDeleteRasterizer(rast); nsvgDelete(svg);
+  out.width = w; out.height = h;
+  return out;
+}
+#endif
 
 void appendBytes(void* ctx, void* data, int size) {
   auto* out = static_cast<std::vector<uint8_t>*>(ctx);
@@ -70,7 +115,15 @@ Image decode(const uint8_t* bytes, size_t len) {
     out.error = "unsupported image format (WebP: build without libwebp)"; return out;
 #endif
   }
-  if (!isPng(bytes, len) && !isJpeg(bytes, len)) { out.error = "unsupported image format (PNG, JPEG and WebP only)"; return out; }
+  if (isSvg(bytes, len)) {
+#ifdef HOST_HAS_SVG
+    return decodeSvg(bytes, len);
+#else
+    out.error = "unsupported image format (SVG: build without nanosvg, host.json web.svg)"; return out;
+#endif
+  }
+
+  if (!isPng(bytes, len) && !isJpeg(bytes, len)) { out.error = "unsupported image format (PNG, JPEG, WebP and SVG only)"; return out; }
   int w = 0, h = 0, channels = 0;
   // Always ask for 4 channels: palette, grey and RGB PNGs all come out RGBA8, top-down.
   stbi_uc* px = stbi_load_from_memory(bytes, static_cast<int>(len), &w, &h, &channels, 4);

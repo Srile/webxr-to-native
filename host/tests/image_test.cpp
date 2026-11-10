@@ -60,6 +60,29 @@ int main() {
   const uint8_t gif[8] = {'G', 'I', 'F', '8', '9', 'a', 1, 0};
   host::img::Image g = decode(gif, sizeof gif); assert(!g.ok() && g.error.find("unsupported") != std::string::npos);
 
+  // SVG: sized by width/height (mm at 96 dpi), else the viewBox; a red square on the left half, nothing on the right.
+  const char svgText[] = "\xEF\xBB\xBF<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"10\" viewBox=\"0 0 2 1\"><rect width=\"1\" height=\"1\" fill=\"#ff0000\"/></svg>";
+  assert(host::img::isSvg(reinterpret_cast<const uint8_t*>(svgText), sizeof svgText - 1));
+  host::img::Image s = decode(reinterpret_cast<const uint8_t*>(svgText), sizeof svgText - 1);
+#ifndef HOST_HAS_SVG
+  // A build without nanosvg (CMake HOST_SVG off) refuses SVG with an error, as an APK whose game did not ask for it.
+  assert(!s.ok() && s.error.find("SVG") != std::string::npos);
+#else
+  assert(s.ok() && s.width == 20 && s.height == 10);
+  const uint8_t* left = &s.rgba[(5 * 20 + 4) * 4]; const uint8_t* right = &s.rgba[(5 * 20 + 15) * 4];
+  assert(left[0] == 255 && left[1] == 0 && left[3] == 255 && right[3] == 0);
+  const char vbOnly[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 72 68.63\"><path d=\"M0 0h72v68z\"/></svg>";
+  host::img::Image v = decode(reinterpret_cast<const uint8_t*>(vbOnly), sizeof vbOnly - 1);
+  assert(v.ok() && v.width == 72 && v.height == 69);
+  const char mm[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"5mm\"/>";
+  host::img::Image m = decode(reinterpret_cast<const uint8_t*>(mm), sizeof mm - 1);
+  assert(m.ok() && m.width == 38 && m.height == 19);
+#endif
+  const char notSvg[] = "<html><body>404</body></html>";
+  assert(!host::img::isSvg(reinterpret_cast<const uint8_t*>(notSvg), sizeof notSvg - 1));
+  assert(!decode(reinterpret_cast<const uint8_t*>(notSvg), sizeof notSvg - 1).ok());
+
+
   // Resize: a 2x2 red/blue checker to 4x4 keeps its corners and blends in the middle.
   const uint8_t checker[16] = {255, 0, 0, 255,  0, 0, 255, 255,  0, 0, 255, 255,  255, 0, 0, 255};
   std::vector<uint8_t> big = resize(checker, 2, 2, 4, 4);

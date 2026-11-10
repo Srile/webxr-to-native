@@ -122,3 +122,19 @@ test('with a global EventTarget/Event the element rides them', async () => {
   await img.decode(); await tick()
   assert.equal(seen.length, 4); assert.ok(!seen.includes('again'))  // the first listener and onload fire again, the removed one does not
 })
+
+test('an HTMLImageElement is an HTMLElement with an IMG tag, and VideoFrame exists for instanceof', () => {
+  class Element {}
+  class HTMLElement extends Element {}
+  const g = freshGlobal({ EventTarget, Event, HTMLElement })
+  const img = new g.Image()
+  assert.ok(img instanceof g.HTMLElement)
+  assert.ok(img instanceof Element)
+  assert.equal(img.tagName, 'IMG')
+  assert.equal(img.namespaceURI, 'http://www.w3.org/1999/xhtml')
+  assert.equal(img.id, '')
+  img.id = 'icon'
+  assert.equal(img.id, 'icon')
+  assert.equal(typeof g.VideoFrame, 'function')
+  assert.equal(img instanceof g.VideoFrame, false)
+})

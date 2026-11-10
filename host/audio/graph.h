@@ -2,7 +2,9 @@
 // WebAudio graph, rendered in 128-frame quanta (WP-08). Pure DSP: no V8, no
 // Oboe, no allocation inside render(). The nodes WebXR games' audio code
 // builds: Destination, Gain, BufferSource, Oscillator,
-// BiquadFilter, DynamicsCompressor, Panner, plus the AudioListener's params.
+// BiquadFilter, DynamicsCompressor, Panner, plus the AudioListener's params;
+// and (WP-25) Analyser and MediaStreamAudioSource, both pulled every quantum
+// whether or not anything downstream pulls them (a meter connects to nothing).
 //
 // Ownership model
 //   Nodes live in CHUNKS (arrays of Node) that the OWNER allocates on its own
@@ -34,7 +36,9 @@ constexpr uint32_t NONE = 0xFFFFFFFFu;
 // Pseudo slot addressing the listener's params through setParam/schedule.
 constexpr uint32_t LISTENER_SLOT = 0xFFFFFFFEu;
 
-enum class Kind : uint8_t { None, Destination, Gain, BufferSource, Oscillator, Biquad, Compressor, Panner, Listener };
+// Analyser (WP-25): a pass-through that keeps its input's history for the host thread's FFT (audio/analyser.h).
+// MediaStream (WP-25): MediaStreamAudioSourceNode, reading a live capture (LiveInput) set through Op::SetExt.
+enum class Kind : uint8_t { None, Destination, Gain, BufferSource, Oscillator, Biquad, Compressor, Panner, Listener, Analyser, MediaStream };
 enum class EvType : uint8_t { SetValue, LinearRamp, ExpRamp, SetTarget };
 enum Prop : uint8_t {
   P_Type, P_Loop, P_LoopStart, P_LoopEnd, P_PanningModel, P_DistanceModel, P_RefDistance,
@@ -65,6 +69,29 @@ struct AudioBufferData {
   static void (*freeSamples)(void* p, size_t bytes);
  private:
   AudioBufferData() = default; ~AudioBufferData();
+};
+
+// State a node shares with the host thread, refcounted, of the node kind it is made for: an analyser's history
+// (AnalyserState, audio/analyser.h), a live capture track (LiveInput). The graph takes a reference with
+// Op::SetExt and gives it back through Msg::ReleaseExt, so the last unref (a free) happens on the host thread.
+struct Shared {
+  explicit Shared(Kind k) : kind(k) {}
+  virtual ~Shared() = default;
+  const Kind kind;
+  std::atomic<int> refs{1};
+  void ref() { refs.fetch_add(1, std::memory_order_relaxed); }
+  void unref() { if (refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
+};
+// A MediaStreamAudioSourceNode's place in its capture: the next input sample and the resampler's phase; primed
+// once it reads, waiting after an underrun (it resumes where it was once enough has been captured again).
+struct LiveCursor { uint64_t pos = 0; double frac = 0; bool primed = false, waiting = false; };
+// A live capture as the graph sees it (media/mic.h implements it): read() on the render thread, lock- and
+// allocation-free, `n` mono samples at `rate`; false = nothing to play this quantum (silence, out untouched).
+// live(): the track has not ended (a node over an ended track can be freed).
+struct LiveInput : Shared {
+  LiveInput() : Shared(Kind::MediaStream) {}
+  virtual bool read(LiveCursor& c, float* out, int n, double rate) = 0;
+  virtual bool live() const = 0;
 };
 
 struct ParamEvent { EvType type; float value; float timeConstant; float startValue; double time; };
@@ -120,18 +147,20 @@ struct Node {
   // panner
   uint8_t panningModel = 0, distanceModel = D_Inverse;
   float refDistance = 1, rolloff = 1, maxDistance = 10000, coneInner = 360, coneOuter = 360, coneOuterGain = 0;
+  // analyser / media stream source: their shared state (of this node's kind), the source's read position
+  Shared* ext = nullptr; LiveCursor cursor;
   bool isSource() const { return kind == Kind::BufferSource || kind == Kind::Oscillator; }
 };
 
 enum class Op : uint8_t {
   AddNodeChunk, AddEdgeChunk, CreateNode, ReleaseNode, Connect, ConnectParam, Disconnect, DisconnectParam,
-  SetProp, SetParam, Schedule, Cancel, CancelHold, Start, Stop, SetBuffer
+  SetProp, SetParam, Schedule, Cancel, CancelHold, Start, Stop, SetBuffer, SetExt
 };
 struct Command {
   Op op = Op::CreateNode; uint8_t kind = 0, evType = 0, prop = 0; int16_t param = -1;
   uint32_t a = 0, b = 0, count = 0; double t = 0, v = 0, v2 = 0; void* ptr = nullptr;
 };
-struct Msg { enum Type : uint8_t { Ended, Freed, ReleaseBuffer } type; uint32_t slot; void* ptr; };
+struct Msg { enum Type : uint8_t { Ended, Freed, ReleaseBuffer, ReleaseExt } type; uint32_t slot; void* ptr; };
 
 // Single-producer single-consumer ring (power-of-two capacity, fixed at construction).
 template <typename T> class Ring {
@@ -185,6 +214,7 @@ class Graph {
   void start(uint32_t slot, double when, double offset, double duration);
   void stop(uint32_t slot, double when);
   void setBuffer(uint32_t slot, AudioBufferData* buf);
+  void setExt(uint32_t slot, Shared* s);  // takes the caller's reference; refused (released) unless s->kind is the node's
   float paramValue(uint32_t slot, int param) const;
   float reduction(uint32_t slot) const;
 
@@ -205,6 +235,8 @@ class Graph {
   void processBiquad(Node& n, int inCh);
   void processCompressor(Node& n, int inCh);
   void processPanner(Node& n, int inCh);
+  void processAnalyser(Node& n, int inCh);
+  void processMediaStream(Node& n);
   void processDestination(Node& n, int inCh);
   void finishSource(Node& n, uint32_t slot);
   void detachFinished();

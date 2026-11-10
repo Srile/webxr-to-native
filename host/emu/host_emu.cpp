@@ -92,7 +92,13 @@ bool Host::startJs() {
   bool ok = engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) {
     installConsole(ctx, [this](int level, const std::string& m) { bridgeLog(m); if (inspector_) inspector_->consoleMessage(level, m); });
     v8::Local<v8::Object> native = installNativeCore(ctx, svc_);
+#ifdef HOST_HAS_MICROPHONE
+    installMedia(ctx, native, svc_);  // host.json media.microphone (WP-25); before installAudio, which binds its tracks
+#endif
     installWebGL(ctx, native, svc_); installImages(ctx, native, svc_); installAudio(ctx, native, svc_); installXr(ctx, native, svc_); installWorkers(ctx, native, svc_); installPlatform(ctx, native, svc_); installWasmInterp(ctx, native, svc_); installRtc(ctx, native, svc_);
+#ifdef HOST_HAS_STORAGE
+    installStorage(ctx, native, svc_);  // host.json storage.indexedDB / storage.cache (WP-26)
+#endif
   });
   if (!ok) return false;
   bridge_.engine = &engine_;

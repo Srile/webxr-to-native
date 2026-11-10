@@ -44,6 +44,15 @@ void installWorkers(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Ho
 void installPlatform(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
 // __native.rtc: WebSocket + WebRTC data channels (rtc/rtc_bind.cpp, WP-21); nothing in a build without HOST_WEBRTC.
 void installRtc(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
+// __native.media: microphone capture (media/media_bind.cpp, WP-25), only in a build with HOST_MICROPHONE (host.json
+// media.microphone); installed before installAudio, which then binds __native.audio.setInput to its tracks.
+void installMedia(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
+namespace audio { struct LiveInput; }
+// The audio binding's source of capture tracks (id -> a LiveInput with one reference for the caller, or null).
+void setAudioLiveInputs(audio::LiveInput* (*resolve)(uint32_t trackId));
+// __native.storage: IndexedDB + Cache API over SQLite (storage/storage_bind.cpp, WP-26), only in a build with
+// HOST_STORAGE (host.json storage.indexedDB / storage.cache). Installed on the page's __native and on every worker's.
+void installStorage(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
 // __native.wasmi: WebAssembly through WAMR where V8 has none (js/wasm_interp.cpp; a no-op in builds without WAMR).
 // Installed on the page's __native and on every worker's.
 void installWasmInterp(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);

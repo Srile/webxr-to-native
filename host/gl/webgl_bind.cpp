@@ -20,10 +20,12 @@
 #include "js/natives.h"
 #include "js/bind.h"
 #include "core/log.h"
+#include <bit>
 #include <cstring>
 #include <string>
 #include <vector>
 #include "gl/gl_proxy.h"  // last: GL calls below run on the GL thread when the queue is on
+
 
 namespace host {
 namespace wgl {
@@ -289,7 +291,7 @@ void f_getInternalformatParameter(const Args& a) {
 // while the GL thread uploads. Past kQueueInlineMax (a texture at boot, a big buffer) the call runs synchronously
 // instead, zero-copy: the page waits for the GL thread, which reads the page's memory directly.
 enum : uint32_t { kOpBufferData = glq::kFirstHand, kOpBufferSubData, kOpTexImage2D, kOpTexSubImage2D, kOpTexImage3D, kOpTexSubImage3D,
-                  kOpDrawBuffers, kOpInvalidate, kOpInvalidateSub, kOpSaveFb, kOpRestoreFb, kOpMultiDraw };
+                  kOpDrawBuffers, kOpInvalidate, kOpInvalidateSub, kOpSaveFb, kOpRestoreFb, kOpMultiDraw, kOpClearFrame };
 constexpr size_t kQueueInlineMax = 1u << 20;
 inline bool queueing() { return glq::active() && !glq::onGLThread(); }
 // [op, head..., payload bytes rounded up to words]; head[0..] are the caller's words.
@@ -454,27 +456,39 @@ void f_drawCount(const Args& a) { glq::finish(); a.GetReturnValue().Set((double)
 // (preserveDrawingBuffer false): colour 0, depth 1, stencil 0, whatever the page's masks, scissor and clear values are,
 // all of which (and the draw binding) are put back. Pages that never clear the default framebuffer themselves
 // (Wonderland's final pass runs depth-tested against it) rely on it. Stack only: it runs once per flat frame.
+// Clears fbo to (0, 0, 0, alpha), depth 1, stencil 0 whatever the page's masks, scissor and clear values are, and
+// leaves every one of them as it found it. On the thread that owns the context: the glGet* here are cheap there.
+void clearFbo(GLuint fbo, GLuint mask, float alpha) {
+  GLint draw = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+  GLboolean cm[4], dm; GLint sm = 0, smBack = 0; GLfloat cc[4], cd = 1; GLint cs = 0;
+  glGetBooleanv(GL_COLOR_WRITEMASK, cm); glGetBooleanv(GL_DEPTH_WRITEMASK, &dm); glGetIntegerv(GL_STENCIL_WRITEMASK, &sm); glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &smBack);
+  glGetFloatv(GL_COLOR_CLEAR_VALUE, cc); glGetFloatv(GL_DEPTH_CLEAR_VALUE, &cd); glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &cs);
+  const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST), discard = glIsEnabled(GL_RASTERIZER_DISCARD);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+  if (scissor) glDisable(GL_SCISSOR_TEST);
+  if (discard) glDisable(GL_RASTERIZER_DISCARD);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE); glDepthMask(GL_TRUE); glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+  glClearColor(0, 0, 0, alpha); glClearDepthf(1); glClearStencil(0);
+  glClear(mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));
+  glClearColor(cc[0], cc[1], cc[2], cc[3]); glClearDepthf(cd); glClearStencil(cs);
+  glColorMask(cm[0], cm[1], cm[2], cm[3]); glDepthMask(dm);
+  glStencilMaskSeparate(GL_FRONT, (GLuint)sm); glStencilMaskSeparate(GL_BACK, (GLuint)smBack);
+  if (discard) glEnable(GL_RASTERIZER_DISCARD);
+  if (scissor) glEnable(GL_SCISSOR_TEST);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+}
 void f_clearDrawingBuffer(const Args& a) {
   ARG_U32(0, fbo); ARG_U32(1, mask);
-  glq::sync("clearDrawingBuffer", [&] {
-    GLint draw = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
-    GLboolean cm[4], dm; GLint sm = 0, smBack = 0; GLfloat cc[4], cd = 1; GLint cs = 0;
-    glGetBooleanv(GL_COLOR_WRITEMASK, cm); glGetBooleanv(GL_DEPTH_WRITEMASK, &dm); glGetIntegerv(GL_STENCIL_WRITEMASK, &sm); glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &smBack);
-    glGetFloatv(GL_COLOR_CLEAR_VALUE, cc); glGetFloatv(GL_DEPTH_CLEAR_VALUE, &cd); glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &cs);
-    const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST), discard = glIsEnabled(GL_RASTERIZER_DISCARD);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
-    if (scissor) glDisable(GL_SCISSOR_TEST);
-    if (discard) glDisable(GL_RASTERIZER_DISCARD);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE); glDepthMask(GL_TRUE); glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
-    glClearColor(0, 0, 0, 0); glClearDepthf(1); glClearStencil(0);
-    glClear(mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));
-    glClearColor(cc[0], cc[1], cc[2], cc[3]); glClearDepthf(cd); glClearStencil(cs);
-    glColorMask(cm[0], cm[1], cm[2], cm[3]); glDepthMask(dm);
-    glStencilMaskSeparate(GL_FRONT, (GLuint)sm); glStencilMaskSeparate(GL_BACK, (GLuint)smBack);
-    if (discard) glEnable(GL_RASTERIZER_DISCARD);
-    if (scissor) glEnable(GL_SCISSOR_TEST);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
-  });
+  glq::sync("clearDrawingBuffer", [&] { clearFbo(fbo, mask, 0); });
+}
+// clearFrame(fbo, mask, alpha): the XR layer's per-frame clear (host.json xr.clearFrame; runtime/src/webxr/layers.js).
+// One queued command with the GL thread on: no state is read back on the JS thread, the clear just takes its place
+// in the stream before the page's draws. Inline otherwise.
+uint32_t h_clearFrame(const uint32_t* c) { clearFbo((GLuint)c[1], (GLuint)c[2], std::bit_cast<float>(c[3])); return 4; }  // [op, fbo, mask, alpha]
+void f_clearFrame(const Args& a) {
+  ARG_U32(0, fbo); ARG_U32(1, mask); double alpha = 0; if (a.Length() > 2) (void)wgl::argNum(a, 2, alpha);
+  if (glq::active() && !glq::onGLThread()) glq::put(kOpClearFrame, fbo, mask, (float)alpha);
+  else clearFbo(fbo, mask, (float)alpha);
 }
 // readPixels(x, y, width, height, format, type, dst | pboOffset, dstOffset = 0)
 void f_readPixels(const Args& a) {
@@ -1071,7 +1085,7 @@ void installWebGL(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Host
     {"clientWaitSync", f_clientWaitSync}, {"waitSync", f_waitSync}, {"getSyncParameter", f_getSyncParameter},
     {"multiDrawArraysWEBGL", f_multiDrawArraysWEBGL}, {"multiDrawElementsWEBGL", f_multiDrawElementsWEBGL},
     {"multiDrawArraysInstancedWEBGL", f_multiDrawArraysInstancedWEBGL}, {"multiDrawElementsInstancedWEBGL", f_multiDrawElementsInstancedWEBGL},
-    {"multiDrawElementsIndirect", f_multiDrawElementsIndirect}, {"multiDrawArraysIndirect", f_multiDrawArraysIndirect}, {"multiDrawInfo", f_multiDrawInfo}, {"clearDrawingBuffer", f_clearDrawingBuffer}, {"drawCount", f_drawCount},
+    {"multiDrawElementsIndirect", f_multiDrawElementsIndirect}, {"multiDrawArraysIndirect", f_multiDrawArraysIndirect}, {"multiDrawInfo", f_multiDrawInfo}, {"clearDrawingBuffer", f_clearDrawingBuffer}, {"clearFrame", f_clearFrame}, {"drawCount", f_drawCount},
   };
   for (auto& h : hand) wgl::installFn(ctx, gl, h.name, h.cb);
   // The GL thread's decoders, and the ring for the JS encoders (runtime/src/webgl/queue.gen.js).
@@ -1081,6 +1095,8 @@ void installWebGL(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Host
   glq::registerOp(kOpTexImage3D, h_texImage3D); glq::registerOp(kOpTexSubImage3D, h_texSubImage3D);
   glq::registerOp(kOpDrawBuffers, h_drawBuffers); glq::registerOp(kOpInvalidate, h_invalidate); glq::registerOp(kOpInvalidateSub, h_invalidateSub);
   glq::registerOp(kOpSaveFb, h_saveFb); glq::registerOp(kOpRestoreFb, h_restoreFb); glq::registerOp(kOpMultiDraw, h_multiDraw);
+  glq::registerOp(kOpClearFrame, h_clearFrame);
+
   if (glq::active()) {
     v8::Isolate* iso = isolateOf(ctx);
     wgl::installFn(ctx, gl, "glqReserve", [](const Args& a) { uint32_t n = 0; if (!wgl::argU32(a, 0, n)) return; wgl::retU(a, glq::reserve(n)); });
