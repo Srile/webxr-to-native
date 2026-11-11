@@ -85,6 +85,7 @@ bool Host::start() {
 
 bool Host::startXrInstance() {
   if (xrInstance_) return true;
+  xr_.setRenderModels(config_.at("xr").bo("renderModels", false));
   if (!xr_.createInstance(app_)) return false;
   { const Json& x = config_.at("xr"); const Json& p = x.at("perf"); PerfConfig pc;
     std::string lvl = p.s("start", "sustained_high");
@@ -93,7 +94,8 @@ bool Host::startXrInstance() {
     pc.window = std::max(10, (int)p.n("window", 90)); pc.missRatio = (float)p.n("missRatio", 0.05); pc.stableWindows = std::max(1, (int)p.n("stableWindows", 5));
     xr_.setPerfConfig(pc);
     xr_.setFoveationDynamic(x.bo("foveationDynamic", false));
-    invalidateAcquire_ = x.bo("invalidate", true); }
+    invalidateAcquire_ = x.bo("invalidate", true);
+    xr_.setPreferLocalFloor(x.s("baseSpace", "stage") == "local-floor"); }
   if (!glq::sync("createSession", [&] { return xr_.createSession(egl_); })) return false;
   xrInstance_ = true; xrSession_ = true;
   // The frame's threads, for the runtime's scheduler (XR_KHR_android_thread_settings; host.json xr.threadHints,
@@ -177,7 +179,7 @@ bool Host::startJs() {
 #ifdef HOST_HAS_MICROPHONE
     installMedia(ctx, native, svc_);  // host.json media.microphone (WP-25); before installAudio, which binds its tracks
 #endif
-    installWebGL(ctx, native, svc_); installImages(ctx, native, svc_); installAudio(ctx, native, svc_); installXr(ctx, native, svc_); installWorkers(ctx, native, svc_); installPlatform(ctx, native, svc_); installRtc(ctx, native, svc_);
+    installWebGL(ctx, native, svc_); installImages(ctx, native, svc_); installAudio(ctx, native, svc_); installXr(ctx, native, svc_); installWorkers(ctx, native, svc_); installPlatform(ctx, native, svc_); installRtc(ctx, native, svc_); installSteam(ctx, native, svc_);
 #ifdef HOST_V8_INTL
     intl::install(ctx, native);
 #endif
@@ -208,6 +210,8 @@ bool Host::xrBegin(const Json& opts, Json& out) {
   // RGBA8 swapchain as linear, washed out (a projection layer's texture array it shows as sRGB), so such a layer gets
   // an sRGB one and the runtime turns GL's conversion on write off while the page draws into it (webxr/layers.js).
   if (opts.n("srgbLayer", 0) > 0.5 && d.arraySize == 1) d.glFormat = 0x8C43;  // GL_SRGB8_ALPHA8
+  // host.json xr.srgbSwapchain: an sRGB swapchain with alpha, drawn through RGBA8 views (SwapchainDesc::srgbView).
+  if (config_.at("xr").bo("srgbSwapchain", false)) { d.glFormat = 0x8C43; d.srgbView = true; }
   // Scene data is behind a runtime permission (Horizon OS v60+). The dialog's answer never reaches native code:
   // xrTick re-checks on the next FOCUSED and queries again.
   if (d.scene && !hasPermission(svc_.javaVm, svc_.activity, kScenePermission)) { scenePermissionAsked_ = true; requestPermission(svc_.javaVm, svc_.activity, kScenePermission); }
@@ -398,7 +402,7 @@ void Host::xrTickPipelined() {
   f.colorTexture = f.shouldRender && xr_.swapchainWidth() > 0 ? wgl::kXrImage : 0; f.imageIndex = 0;
   glq::put(kOpXrBegin, f.shouldRender ? 1u : 0u);
   gc_.setInFrame(true);
-  if (jsUp_) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.hasStage()); });
+  if (jsUp_) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.baseIsFloor()); });
   const double t1 = loop_.now(); jsMs_ += t1 - t0;
   if (f.shouldRender && !shots_.empty()) captureShots(&g_glFrame);  // a sync: reads the GL thread's frame once it has run
   PipeEnd e{}; e.displayTime = f.displayTime; e.shouldRender = f.shouldRender;
@@ -446,7 +450,7 @@ void Host::xrTick() {
   gc_.setInFrame(true);  // pre-submit window: a GC pause from here to xrEndFrame's return delays the frame
   if (mode_ == "native-clear") { if (f.shouldRender) clear_.drawXr(f); }
   else if (jsUp_) {
-    engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.hasStage()); });
+    engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.baseIsFloor()); });
   }
   const double t1 = loop_.now(); jsMs_ += t1 - t0;
   if (f.shouldRender) captureShots(&f);

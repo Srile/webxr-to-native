@@ -304,7 +304,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT HOST_TESTS)
     list(FILTER LINUX_XR_SOURCES EXCLUDE REGEX "/emu/emu_xr\\.cpp$")
     add_executable(webxrhost-linux-xr ${LINUX_XR_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/linux/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/linux/xr_glue.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/emu/glfw_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/net/http_curl.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/xr/openxr_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_scene.cpp)
+      ${CMAKE_CURRENT_SOURCE_DIR}/xr/openxr_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_scene.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_render_models.cpp)
     # The pinned OpenXR headers (third_party/openxr, 1.1.49) ahead of the distribution's; the loader is the system's.
     target_include_directories(webxrhost-linux-xr BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs ${TP}/openxr/include)
     get_target_property(_defs webxrhost-linux COMPILE_DEFINITIONS)

@@ -169,6 +169,19 @@ if (app.icon) {
   }
 }
 
+// 2b. Steamworks (host.json steam.appId + steam.lib): the game's libsteam_api.so for Android arm64, from its
+// Steamworks SDK (redistributable_bin/androidarm64), packed beside the host (host/steam/steam_bind.cpp opens it).
+// Staged fresh each pack, so no other game's APK carries it.
+const hostJni = join(root, 'android/app/build/host-jni')
+rmSync(hostJni, { recursive: true, force: true })
+if (cfg.steam?.lib) {
+  const lib = resolve(cfgDir, cfg.steam.lib)
+  if (!existsSync(lib)) { console.error(`steam.lib not found: ${lib} (the Steamworks SDK's redistributable_bin/androidarm64/libsteam_api.so)`); process.exit(2) }
+  mkdirSync(join(hostJni, 'arm64-v8a'), { recursive: true })
+  cpSync(lib, join(hostJni, 'arm64-v8a', 'libsteam_api.so'))
+  console.log(`steam: app ${cfg.steam.appId}, ${lib}`)
+}
+
 // 3. gradle
 const task = release ? 'assembleRelease' : 'assembleDebug'
 const versionCode = app.versionCode ?? Math.floor(Date.now() / 60000) % 2000000000

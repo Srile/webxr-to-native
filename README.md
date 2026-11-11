@@ -78,7 +78,7 @@ What it does not do:
 - The page's HTML and CSS are never laid out or drawn: there is no layout engine. Menus have to be in the 3D
   scene. Where a page's HTML UI would make a choice (a "VR" button, a privacy prompt), a short boot script can
   make it: `web.inject` below.
-- No `<video>` or `<audio>` playback, no camera, no WebGPU.
+- No `<video>` playback (`<audio>` with `audio.elements`), no camera, no WebGPU.
 
 ## How it works
 
@@ -178,6 +178,7 @@ leaves one off carries none of its native code or permissions, and its page does
 | `web.dist` | | the built web app |
 | `web.origin` | `https://app.local` | the page's `location.origin`; relative URLs resolve against it |
 | `web.query` | | appended to `location.search` |
+| `web.remote` | `[]` | same-origin path prefixes (`"/api/"`) fetched from `web.origin` over the network instead of the packed files |
 | `web.exclude` | | globs of files not to pack (`*.map`, …) |
 | `web.inject` | | the game's own boot scripts, imported before the entry: where the HTML UI would have made a choice |
 | `web.startGesture` | `false` | phones: treat launch as the first tap, for pages that wait for one before starting sound |
@@ -186,7 +187,7 @@ leaves one off carries none of its native code or permissions, and its page does
 | `web.svg` | `false` | SVG images (nanosvg) |
 | `web.serviceWorker` | `false` | `navigator.serviceWorker`; `debug.serviceWorker` logs every load it answers |
 | `network.allow` | `[]` | origins `fetch`, XHR and WebSocket may reach; everything else is refused |
-| `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game |
+| `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game; with `media.microphone` too, Opus audio tracks (libSRTP) |
 | `storage.indexedDB`, `storage.cache` | `false` | IndexedDB, the Cache API (SQLite, under the app's files) |
 | `storage.quotaMB` | `1024` | the origin's databases together; past it a write fails with `QuotaExceededError` |
 | `media.microphone` | `false` | `getUserMedia` for audio; adds the `RECORD_AUDIO` permission, asked for on first use (Android, macOS) |
@@ -196,6 +197,12 @@ leaves one off carries none of its native code or permissions, and its page does
 | `xr.foveation` | the page's | fixed foveation 0..1, overriding what the page sets |
 | `xr.foveationDynamic` | `false` | let the runtime lower foveation when the GPU has headroom |
 | `xr.invalidate` | `true` | discard depth after each frame (saves bandwidth on tilers) |
+| `xr.baseSpace` | `stage` | `local-floor`: the base space is `XR_EXT_local_floor` where the runtime has it |
+| `xr.controllerProfiles` | Touch's | the WebXR input profiles the page sees for the controllers, most specific first |
+| `xr.renderModels` | `false` | the runtime's own controller models (`XR_EXT_render_model`) as `XRFrame.getRenderModel(inputSource)` |
+| `xr.srgbSwapchain` | `false` | an sRGB swapchain with alpha, drawn through RGBA8 texture views (runtimes with no RGBA8 swapchain and GL without `EXT_sRGB_write_control`) |
+| `audio.elements` | `false` | `<audio>` / `new Audio()` play through the Web Audio graph (fetched and decoded whole) |
+| `steam.appId`, `steam.lib` | | Steamworks (`__native.steam`, host/steam/steam_bind.cpp): the app id and the Steamworks SDK's Android `libsteam_api.so`, packed into the APK and opened at runtime against the device's Steam client (the Steam Frame's Android container provides `libsteamclient.so`) |
 | `xr.clearFrame` | `false` | clear an `XRWebGLLayer` before each frame, as a browser does (one queued GL op); for engines that do not clear it themselves, like Wonderland |
 | `xr.perf` | | CPU/GPU performance levels (`XR_EXT_performance_settings`): `{ enabled, start, adaptive, … }` |
 | `gl.thread` | `true` (Quest) | run the page's GL calls on a GL thread; `adb shell setprop debug.webxr.glthread 0` overrides it |

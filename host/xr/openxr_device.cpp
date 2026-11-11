@@ -36,6 +36,7 @@ bool OpenXrDevice::createInstance(android_app* app) {
   auto has = [&](const char* name) { for (auto& p : props) if (!strcmp(p.extensionName, name)) return true; return false; };
 #ifdef __ANDROID__
   std::vector<const char*> exts = { XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME, XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME };
+  { std::string all; for (auto& p : props) { all += all.empty() ? "" : " "; all += p.extensionName; } HOST_LOGI("OpenXR runtime extensions: %s", all.c_str()); }
 #else
   // Desktop (the Linux host on Monado / WiVRn, WP-18b): the host's EGL context through XR_MNDX_egl_enable, the only
   // EGL binding a desktop runtime offers. The graphics requirements still come from a KHR enable extension (the
@@ -48,6 +49,7 @@ bool OpenXrDevice::createInstance(android_app* app) {
   for (auto* e : exts) if (!has(e)) { HOST_LOGE("required OpenXR extension missing: %s", e); return false; }
   auto opt = [&](const char* name, bool& flag) { flag = has(name); if (flag) exts.push_back(name); HOST_LOGI("ext %s: %s", name, flag ? "yes" : "no"); };
   opt(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME, extRefresh_);
+  opt(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME, extLocalFloor_);
 #ifdef __ANDROID__
   opt(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME, extThread_);
 #endif
@@ -58,6 +60,11 @@ bool OpenXrDevice::createInstance(android_app* app) {
   opt(XR_EXT_HAND_TRACKING_EXTENSION_NAME, extHand_);
   opt(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME, extHandAim_);
   opt(XR_FB_COLOR_SPACE_EXTENSION_NAME, extColorSpace_);
+  if (renderModels_.enabled()) {  // host.json xr.renderModels: the runtime's own controller models
+    bool uuid = false; opt(XR_EXT_UUID_EXTENSION_NAME, uuid);
+    opt(XR_EXT_RENDER_MODEL_EXTENSION_NAME, extRenderModel_);
+    opt(XR_EXT_INTERACTION_RENDER_MODEL_EXTENSION_NAME, extInteractionModel_);
+  }
   if (!fovCfg || !extSwapUpdate_) extFoveation_ = false;  // xrUpdateSwapchainFB (the only way to hand a swapchain a profile) lives in XR_FB_swapchain_update_state
   // immersive-ar: passthrough under the eye buffer, the room's anchors as planes and meshes, the system's room setup.
   opt(XR_FB_PASSTHROUGH_EXTENSION_NAME, sceneExt_.passthrough);
@@ -88,6 +95,16 @@ bool OpenXrDevice::createInstance(android_app* app) {
 
   XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO}; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
   XR_CHECK(xrGetSystem(instance_, &sgi, &system_), "xrGetSystem");
+  { uint32_t nb = 0; xrEnumerateEnvironmentBlendModes(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &nb, nullptr);
+    std::vector<XrEnvironmentBlendMode> modes(nb);
+    if (nb) xrEnumerateEnvironmentBlendModes(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, nb, &nb, modes.data());
+    std::string list;
+    for (auto m : modes) {
+      list += list.empty() ? "" : " ";
+      list += m == XR_ENVIRONMENT_BLEND_MODE_OPAQUE ? "opaque" : m == XR_ENVIRONMENT_BLEND_MODE_ADDITIVE ? "additive" : m == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND ? "alpha-blend" : "other";
+      if (m == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) envAlphaBlend_ = true;
+    }
+    HOST_LOGI("environment blend modes: %s", list.empty() ? "none" : list.c_str()); }
   XrSystemHandTrackingPropertiesEXT handProps{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
   XrSystemPassthroughProperties2FB ptProps{XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES2_FB};
   XrSystemPassthroughPropertiesFB ptProps1{XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES_FB};  // the pre-v3 shape, which some runtimes fill instead
@@ -159,7 +176,11 @@ bool OpenXrDevice::createSession(Egl& egl) {
   rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL; XR_CHECK(xrCreateReferenceSpace(session_, &rs, &localSpace_), "local space");
   rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW; XR_CHECK(xrCreateReferenceSpace(session_, &rs, &viewSpace_), "view space");
   if (hasSpace(XR_REFERENCE_SPACE_TYPE_STAGE)) { rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE; XR_CHECK(xrCreateReferenceSpace(session_, &rs, &stageSpace_), "stage space"); updateBounds(); }
-  HOST_LOGI("reference spaces: local, view%s", stageSpace_ ? ", stage" : "");
+  if (preferLocalFloor_ && extLocalFloor_ && hasSpace(XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT)) {
+    rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT; XR_CHECK(xrCreateReferenceSpace(session_, &rs, &floorSpace_), "local-floor space");
+  }
+  HOST_LOGI("reference spaces: local, view%s%s%s", stageSpace_ ? ", stage" : "", floorSpace_ ? ", local-floor (the base)" : "",
+    preferLocalFloor_ && !floorSpace_ ? " (local-floor asked for but unavailable)" : "");
 
   if (extColorSpace_) {
     PFN_xrSetColorSpaceFB setCs = nullptr; xrGetInstanceProcAddr(instance_, "xrSetColorSpaceFB", (PFN_xrVoidFunction*)&setCs);
@@ -168,6 +189,7 @@ bool OpenXrDevice::createSession(Egl& egl) {
   enumerateRefreshRates();
   scene_.init(instance_, session_, sceneExt_);
   if (!input_.create(instance_, session_, extHand_, extHandAim_)) HOST_LOGW("input setup failed; continuing without controllers");
+  renderModels_.create(instance_, session_, extRenderModel_, extInteractionModel_);
   return true;
 }
 
@@ -303,18 +325,41 @@ bool OpenXrDevice::createSwapchain(const SwapchainDesc& d) {
   XR_CHECK(xrEnumerateSwapchainImages(swapchain_, ni, &ni, (XrSwapchainImageBaseHeader*)imgs.data()), "xrEnumerateSwapchainImages");
   scImages_.clear(); for (auto& i : imgs) scImages_.push_back(i.image);
   scW_ = ci.width; scH_ = ci.height; scArray_ = ci.arraySize; scFormat_ = fmt;
+  if (d.srgbView && fmt == 0x8C43 /*GL_SRGB8_ALPHA8*/) {
+    using TextureView = void (GL_APIENTRY*)(GLuint, GLenum, GLuint, GLenum, GLuint, GLuint, GLuint, GLuint);
+    const char* ext = (const char*)glGetString(GL_EXTENSIONS);
+    TextureView view = nullptr;
+    if (ext && strstr(ext, "GL_OES_texture_view")) view = (TextureView)eglGetProcAddress("glTextureViewOES");
+    else if (ext && strstr(ext, "GL_EXT_texture_view")) view = (TextureView)eglGetProcAddress("glTextureViewEXT");
+    const GLenum target = ci.arraySize > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+    bool ok = view != nullptr;
+    while (glGetError() != GL_NO_ERROR) {}
+    for (size_t i = 0; ok && i < scImages_.size(); ++i) {
+      GLuint v = 0; glGenTextures(1, &v);
+      view(v, target, scImages_[i], GL_RGBA8, 0, 1, 0, ci.arraySize);
+      if (glGetError() != GL_NO_ERROR) { glDeleteTextures(1, &v); ok = false; break; }
+      scViews_.push_back(v);
+    }
+    if (ok) { scImages_ = scViews_; scFormat_ = 0x8058; HOST_LOGI("swapchain #%u: sRGB images drawn through RGBA8 views", swapchainSerial_); }
+    else {
+      if (!scViews_.empty()) glDeleteTextures((GLsizei)scViews_.size(), scViews_.data());
+      scViews_.clear();
+      HOST_LOGW("swapchain #%u: no RGBA8 views of its sRGB images (%s); colours are encoded twice", swapchainSerial_, view ? "glTextureView failed" : "no texture views");
+    }
+  }
   HOST_LOGI("swapchain #%u %ux%u x%u fmt 0x%llx, %u images", swapchainSerial_, ci.width, ci.height, ci.arraySize, (long long)fmt, ni);
   // A new swapchain starts unfoveated: hand it the remembered level now, before its first frame.
   if (fovWanted_ >= 0) applyFoveation();
   else HOST_LOGI("foveation swapchain #%u: NONE (not set)%s", swapchainSerial_, foveationSupported() ? "" : ", XR_FB_foveation unavailable");
   unpremultiplied_ = d.unpremultiplied;
-  blendAlpha_ = d.passthrough && scene_.startPassthrough();
+  blendAlpha_ = d.passthrough && (scene_.startPassthrough() || envAlphaBlend_);
   if (d.passthrough && !blendAlpha_) HOST_LOGW("passthrough asked for but unavailable; compositing opaque");
   if (d.scene) scene_.startScene();
   return true;
 }
 
 void OpenXrDevice::destroySwapchain() {
+  if (!scViews_.empty()) { glDeleteTextures((GLsizei)scViews_.size(), scViews_.data()); scViews_.clear(); }
   if (swapchain_) { xrDestroySwapchain(swapchain_); swapchain_ = XR_NULL_HANDLE; scImages_.clear(); }
   fovApplied_ = -1;
   if (blendAlpha_) scene_.stopPassthrough(); blendAlpha_ = false;
@@ -333,7 +378,7 @@ bool OpenXrDevice::declareThread(XrAndroidThreadTypeKHR type, uint32_t tid) {
 bool OpenXrDevice::beginSession() {
   XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO}; bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
   XR_CHECK(xrBeginSession(session_, &bi), "xrBeginSession");
-  running_ = true; input_.attach(); HOST_LOGI("session begun");
+  running_ = true; input_.attach(); renderModels_.markDirty(); HOST_LOGI("session begun");
   perfLastPredicted_ = 0; perfWinFrames_ = perfWinMisses_ = perfStable_ = 0;
   if (!extPerf_) HOST_LOGI("perf: XR_EXT_performance_settings unavailable");
   else if (!perfCfg_.enabled) HOST_LOGI("perf: levels left to the runtime (host.json xr.perf.enabled false)");
@@ -358,7 +403,8 @@ bool OpenXrDevice::pollEvents() {
       case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: HOST_LOGE("instance loss pending"); return false;
       case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: refChanged_ = true; updateBounds(); break;
       case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: { auto* e = (XrEventDataDisplayRefreshRateChangedFB*)&ev; rate_ = e->toDisplayRefreshRate; rateChanged_ = true; HOST_LOGI("refresh rate %.0f -> %.0f", e->fromDisplayRefreshRate, e->toDisplayRefreshRate); break; }
-      case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: HOST_LOGI("interaction profile changed"); break;
+      case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: HOST_LOGI("interaction profile changed"); renderModels_.markDirty(); break;
+      case XR_TYPE_EVENT_DATA_INTERACTION_RENDER_MODELS_CHANGED_EXT: renderModels_.markDirty(); break;
       case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
         auto* e = (XrEventDataPerfSettingsEXT*)&ev;
         static const char* sub[] = {"?", "compositing", "rendering", "thermal"};
@@ -433,8 +479,8 @@ void OpenXrDevice::locateWaited(XrFrameInfo& out, double loopNowMs) {
     v.fovL = views[i].fov.angleLeft; v.fovR = views[i].fov.angleRight; v.fovU = views[i].fov.angleUp; v.fovD = views[i].fov.angleDown;
     out.viewPose[i] = p; out.viewFov[i] = views[i].fov;
   }
-  if (stageSpace_) {
-    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION}; xrLocateSpace(localSpace_, stageSpace_, out.displayTime, &loc);
+  if (base != localSpace_) {
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION}; xrLocateSpace(localSpace_, base, out.displayTime, &loc);
     out.localInBasePos[0] = loc.pose.position.x; out.localInBasePos[1] = loc.pose.position.y; out.localInBasePos[2] = loc.pose.position.z;
     out.localInBaseQuat[0] = loc.pose.orientation.x; out.localInBaseQuat[1] = loc.pose.orientation.y; out.localInBaseQuat[2] = loc.pose.orientation.z; out.localInBaseQuat[3] = loc.pose.orientation.w;
   }
@@ -442,6 +488,7 @@ void OpenXrDevice::locateWaited(XrFrameInfo& out, double loopNowMs) {
   out.sceneGeneration = scene_.generation();
   const double tD = xrNowMs(); prof_[2] += tD - tC;
   input_.sync(session_, base, out.displayTime, out.input);
+  renderModels_.update(input_.gripSpaces(), out.displayTime);
   prof_[3] += xrNowMs() - tD;
   out.width = scW_; out.height = scH_; out.arraySize = scArray_;
 }
@@ -489,6 +536,11 @@ void OpenXrDevice::endFrame(const XrFrameInfo& f, bool submit) {
     if (pt) {
       layers[0] = pt; layers[1] = (XrCompositionLayerBaseHeader*)&layer; ei.layerCount = 2;
       layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | (unpremultiplied_ ? XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT : 0);
+    } else if (blendAlpha_ && envAlphaBlend_) {
+      // No passthrough layer (SteamVR on the Steam Frame): the compositor blends the eye buffer with the world by
+      // its alpha.
+      ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+      layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | (unpremultiplied_ ? XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT : 0);
     }
   }
   XrResult r = xrEndFrame(session_, &ei);
@@ -496,11 +548,13 @@ void OpenXrDevice::endFrame(const XrFrameInfo& f, bool submit) {
 }
 
 void OpenXrDevice::destroy() {
+  renderModels_.destroy();
   input_.destroy();
   scene_.destroy();
   destroySwapchain();
   if (localSpace_) xrDestroySpace(localSpace_); if (stageSpace_) xrDestroySpace(stageSpace_); if (viewSpace_) xrDestroySpace(viewSpace_);
-  localSpace_ = stageSpace_ = viewSpace_ = XR_NULL_HANDLE;
+  if (floorSpace_) xrDestroySpace(floorSpace_);
+  localSpace_ = stageSpace_ = viewSpace_ = floorSpace_ = XR_NULL_HANDLE;
   if (session_) xrDestroySession(session_); session_ = XR_NULL_HANDLE;
   if (instance_) xrDestroyInstance(instance_); instance_ = XR_NULL_HANDLE;
 }

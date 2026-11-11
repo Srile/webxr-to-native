@@ -32,6 +32,7 @@ class XrInput {
   void sync(XrSession sess, XrSpace base, XrTime time, XrInputState& out);
   void vibrate(int hand, float amplitude, float seconds, float hz);
   bool handTracking() const { return handTracking_; }
+  XrSpace* gripSpaces() { return gripSpace_; }
 
  private:
   XrInstance inst_ = XR_NULL_HANDLE; XrSession sess_ = XR_NULL_HANDLE;
