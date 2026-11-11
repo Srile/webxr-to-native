@@ -1355,6 +1355,8 @@ function parseSvgPath(d) {
   const tokens = String(d).match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?/g) || []
   const subs = []
   let sub = null, x = 0, y = 0, sx = 0, sy = 0, i = 0
+  // The last control point, which S and T reflect (only after a cubic or a quadratic, as SVG says).
+  let lastCubic = null, lastQuad = null
   const isCmd = (t) => /[A-Za-z]/.test(t)
   const num = () => parseFloat(tokens[i++])
   const start = (nx, ny) => { sub = [[nx, ny]]; sub.closed = false; subs.push(sub); x = nx; y = ny; sx = nx; sy = ny }
@@ -1378,6 +1380,8 @@ function parseSvgPath(d) {
     if (!isCmd(cmd)) break
     const rel = cmd === cmd.toLowerCase()
     const op = cmd.toUpperCase()
+    if (op !== 'C' && op !== 'S') lastCubic = null
+    if (op !== 'Q' && op !== 'T') lastQuad = null
     if (op === 'Z') { if (sub && (x !== sx || y !== sy)) line(sx, sy); if (sub) sub.closed = true; sub = null; x = sx; y = sy; continue }
     while (i < tokens.length && !isCmd(tokens[i])) {
       if (op === 'M' || op === 'L') {
@@ -1387,10 +1391,23 @@ function parseSvgPath(d) {
         if (op === 'M') while (i < tokens.length && !isCmd(tokens[i])) { let lx = num(), ly = num(); if (rel) { lx += x; ly += y } line(lx, ly) }
       } else if (op === 'H') { let nx = num(); if (rel) nx += x; line(nx, y) }
       else if (op === 'V') { let ny = num(); if (rel) ny += y; line(x, ny) }
-      else if (op === 'C') {
-        let c1x = num(), c1y = num(), c2x = num(), c2y = num(), nx = num(), ny = num()
-        if (rel) { c1x += x; c1y += y; c2x += x; c2y += y; nx += x; ny += y }
+      else if (op === 'C' || op === 'S') {
+        let c1x, c1y
+        if (op === 'S') { c1x = lastCubic ? 2 * x - lastCubic[0] : x; c1y = lastCubic ? 2 * y - lastCubic[1] : y }
+        else { c1x = num(); c1y = num(); if (rel) { c1x += x; c1y += y } }
+        let c2x = num(), c2y = num(), nx = num(), ny = num()
+        if (rel) { c2x += x; c2y += y; nx += x; ny += y }
         curve(c1x, c1y, c2x, c2y, nx, ny)
+        lastCubic = [c2x, c2y]
+      } else if (op === 'Q' || op === 'T') {
+        let qx, qy
+        if (op === 'T') { qx = lastQuad ? 2 * x - lastQuad[0] : x; qy = lastQuad ? 2 * y - lastQuad[1] : y }
+        else { qx = num(); qy = num(); if (rel) { qx += x; qy += y } }
+        let nx = num(), ny = num()
+        if (rel) { nx += x; ny += y }
+        // A quadratic is the cubic with its control points two thirds of the way to the quadratic's.
+        curve(x + 2 / 3 * (qx - x), y + 2 / 3 * (qy - y), nx + 2 / 3 * (qx - nx), ny + 2 / 3 * (qy - ny), nx, ny)
+        lastQuad = [qx, qy]
       } else if (op === 'A') {
         let rx = num(), ry = num(), rot = num(), large = num(), sweep = num(), nx = num(), ny = num()
         if (rel) { nx += x; ny += y }

@@ -374,6 +374,25 @@ test('canvas 2d: Path2D from SVG path data fills and strokes', () => {
   assert.equal(px(c.__rgba, 4, 2, 3)[2], 255)
 })
 
+test('canvas 2d: Path2D reads the S, Q and T curve commands (and draws what follows them)', () => {
+  const g = freshGlobal()
+  const raster = (d) => {
+    const c = new g.OffscreenCanvas(16, 16), ctx = c.getContext('2d')
+    ctx.fillStyle = '#ffffff'; ctx.fill(new g.Path2D(d))
+    return Array.from(c.__rgba)
+  }
+  // Each shorthand draws what its spelled-out form does: S reflects the previous cubic's second
+  // control point, T the previous quadratic's control point, and a quadratic is a cubic at 2/3.
+  assert.deepEqual(raster('M 0 8 C 2 0 6 0 8 8 S 14 16 16 8 V 16 H 0 Z'), raster('M 0 8 C 2 0 6 0 8 8 C 10 16 14 16 16 8 V 16 H 0 Z'))
+  assert.deepEqual(raster('M 0 8 q 4 -8 8 0 t 8 0 V 16 H 0 Z'), raster('M 0 8 Q 4 0 8 8 Q 12 16 16 8 V 16 H 0 Z'))
+  assert.deepEqual(raster('M 0 8 Q 6 2 12 8 V 16 H 0 Z'), raster('M 0 8 C 4 4 8 4 12 8 V 16 H 0 Z'))
+  // With no curve just before it, S's first control point is the current point.
+  assert.deepEqual(raster('M 0 8 L 2 8 S 10 0 16 8 V 16 H 0 Z'), raster('M 0 8 L 2 8 C 2 8 10 0 16 8 V 16 H 0 Z'))
+  // Commands after a quadratic still draw: a square well to its right.
+  const after = raster('M 0 0 q 1 0 1 1 Z M 10 10 h 4 v 4 h -4 Z')
+  assert.equal(after[(12 * 16 + 12) * 4 + 3], 255)
+})
+
 test('an HTMLCanvasElement is an HTMLElement; an OffscreenCanvas is not', () => {
   class EventTarget { constructor() {} addEventListener() {} removeEventListener() {} dispatchEvent() { return true } }
   class HTMLElement extends EventTarget { constructor(tag) { super(); this.tabIndex = 7; this._tag = tag } }
