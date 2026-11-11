@@ -1,5 +1,6 @@
 # WebSocket and WebRTC data channels (WP-21), only in a build for a game whose host.json says network.webrtc
-# (HOST_WEBRTC: tools/pack.mjs and tools/mac.mjs set it). libdatachannel 0.24.6 without media, over Mbed TLS 3.6.7,
+# (HOST_WEBRTC: tools/pack.mjs and tools/mac.mjs set it). libdatachannel 0.24.6 (with media, for Opus audio, only when
+# the game has the microphone too: HOST_RTC_AUDIO), over Mbed TLS 3.6.7,
 # both from source (tools/setup-webrtc.sh), static, into the host's one library. A game without it builds none of it.
 function(host_enable_webrtc target)
   if(NOT EXISTS ${TP}/libdatachannel/CMakeLists.txt OR NOT EXISTS ${TP}/mbedtls/CMakeLists.txt)
@@ -19,9 +20,19 @@ function(host_enable_webrtc target)
     # libdatachannel links MbedTLS::MbedTLS (what find_package would give): the three libraries just added.
     add_library(MbedTLS::MbedTLS INTERFACE IMPORTED GLOBAL)
     set_target_properties(MbedTLS::MbedTLS PROPERTIES INTERFACE_LINK_LIBRARIES "mbedtls;mbedx509;mbedcrypto")
-    foreach(opt USE_MBEDTLS NO_MEDIA NO_EXAMPLES NO_TESTS)
+    foreach(opt USE_MBEDTLS NO_EXAMPLES NO_TESTS)
       set(${opt} ON CACHE BOOL "" FORCE)
     endforeach()
+    # Media (WebRTC audio) only with the microphone too: libSRTP (its own AES and HMAC-SHA1, enough for WebRTC's
+    # default SRTP profile) from tools/setup-webrtc.sh.
+    if(HOST_MICROPHONE)
+      set(NO_MEDIA OFF CACHE BOOL "" FORCE)
+      set(ENABLE_MBEDTLS OFF CACHE BOOL "" FORCE)
+      set(ENABLE_OPENSSL OFF CACHE BOOL "" FORCE)
+      set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)
+    else()
+      set(NO_MEDIA ON CACHE BOOL "" FORCE)
+    endif()
     set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
     set(NO_WEBSOCKET OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -29,6 +40,10 @@ function(host_enable_webrtc target)
   endif()
   target_link_libraries(${target} datachannel-static)  # the plain signature, as the host targets use
   target_compile_definitions(${target} PRIVATE HOST_HAS_WEBRTC)
+  if(HOST_MICROPHONE)
+    target_compile_definitions(${target} PRIVATE HOST_RTC_AUDIO)
+    target_link_libraries(${target} host_opus)
+  endif()
   # libdatachannel reports failures as exceptions; the binding catches them (the rest of the host builds without).
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/rtc/rtc_bind.cpp TARGET_DIRECTORY ${target} PROPERTIES COMPILE_OPTIONS "-fexceptions;-frtti")
   message(STATUS "${target}: WebSocket + WebRTC data channels (libdatachannel, Mbed TLS)")

@@ -23,9 +23,10 @@ namespace audio {
 class CaptureRing {
  public:
   static constexpr uint32_t kCapacity = 1u << 16;  // samples: 1.37 s at 48 kHz
-  static constexpr double kTargetLag = 0.02, kMaxLag = 0.1;  // seconds
+  static constexpr double kTargetLag = 0.02, kMaxLag = 0.1;  // seconds (a microphone's)
 
-  CaptureRing() : buf_(new float[kCapacity]()) {}
+  // targetLag / maxLag: a network stream's arrive in bursts (rtc/rtc_bind.cpp gives a remote voice more margin).
+  explicit CaptureRing(double targetLag = kTargetLag, double maxLag = kMaxLag) : buf_(new float[kCapacity]()), targetLag_(targetLag), maxLag_(maxLag) {}
   ~CaptureRing() { delete[] buf_; }
   CaptureRing(const CaptureRing&) = delete; CaptureRing& operator=(const CaptureRing&) = delete;
 
@@ -57,8 +58,8 @@ class CaptureRing {
     if (inRate <= 0 || outRate <= 0) { c.primed = false; return false; }
     const double step = inRate / outRate;
     const uint64_t span = (uint64_t)(step * n) + 2;  // input samples one quantum interpolates over
-    const uint64_t target = (uint64_t)(inRate * kTargetLag) + burst_.load(std::memory_order_relaxed) + span;
-    const uint64_t most = target + (uint64_t)(inRate * kMaxLag);
+    const uint64_t target = (uint64_t)(inRate * targetLag_) + burst_.load(std::memory_order_relaxed) + span;
+    const uint64_t most = target + (uint64_t)(inRate * maxLag_);
     if (!c.primed && c.waiting && c.pos <= w && w - c.pos <= most) {  // after an underrun: on from where it was
       if (w - c.pos < target) return false;
       c.primed = true; c.waiting = false;
@@ -90,6 +91,7 @@ class CaptureRing {
 
  private:
   float* buf_;
+  const double targetLag_, maxLag_;
   std::atomic<uint64_t> written_{0};
   std::atomic<double> rate_{0};
   std::atomic<uint32_t> burst_{0}, underruns_{0}, overruns_{0};

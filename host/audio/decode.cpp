@@ -290,8 +290,10 @@ AudioBufferData* decodeWebm(const uint8_t* b, size_t len, std::string* err) {
 
 const char* decodableCodecs() {
 #ifdef HOST_HAS_OPUS
+  if (aacBuilt()) return mp3Built() ? "wav vorbis opus mp3 aac" : "wav vorbis opus aac";
   return mp3Built() ? "wav vorbis opus mp3" : "wav vorbis opus";
 #else
+  if (aacBuilt()) return mp3Built() ? "wav vorbis mp3 aac" : "wav vorbis aac";
   return mp3Built() ? "wav vorbis mp3" : "wav vorbis";
 #endif
 }
@@ -302,6 +304,7 @@ AudioBufferData* decodeAudio(const uint8_t* bytes, size_t len, double targetRate
   if (len >= 4 && !memcmp(bytes, "RIFF", 4)) b = decodeWav(bytes, len, &e);
   else if (len >= 4 && !memcmp(bytes, "OggS", 4)) b = isOggOpus(bytes, len) ? decodeOggOpusOrSay(bytes, len, &e) : decodeVorbis(bytes, len, true, 0, &e);
   else if (len >= 4 && !memcmp(bytes, "\x1A\x45\xDF\xA3", 4)) b = decodeWebm(bytes, len, &e);
+  else if (isAac(bytes, len)) b = decodeAac(bytes, len, &e);
   else if (isMp3(bytes, len)) b = decodeMp3(bytes, len, &e);
   else e = "unsupported audio container";
   if (!b) { if (err) *err = e; return nullptr; }

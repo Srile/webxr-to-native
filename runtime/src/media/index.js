@@ -125,7 +125,7 @@ export function install(g) {
       for (const s of this._streams) s._trackEnded()
     }
     clone() {
-      if (this._state === 'ended') return new MediaStreamTrack(TOKEN, { ...this._info, id: 0 }, this._constraints)
+      if (this._state === 'ended' || this._info.remote) return new MediaStreamTrack(TOKEN, { ...this._info, id: 0 }, this._constraints)
       const r = N.open(processing(this._constraints, capsNow()))
       const t = new MediaStreamTrack(TOKEN, typeof r === 'string' ? { ...this._info, id: 0 } : r, this._constraints)
       t.enabled = this._enabled
@@ -247,6 +247,8 @@ export function install(g) {
     g.AudioContext.prototype.createMediaStreamSource = function createMediaStreamSource(stream) { return new MediaStreamAudioSourceNode(this, { mediaStream: stream }) }
   }
 
+  // A WebRTC receiver's track (rtc/index.js): a voice arriving over the network, read like a microphone's.
+  Object.defineProperty(g, '__hostRemoteTrack', { configurable: true, value: (id, label) => new MediaStreamTrack(TOKEN, { id, label: label ?? '', remote: true, deviceId: '', groupId: '', sampleRate: 48000, echoCancellation: false, autoGainControl: false, noiseSuppression: false }, {}) })
   Object.assign(g, { MediaStream, MediaStreamTrack, MediaStreamTrackEvent, MediaDevices, MediaDeviceInfo, InputDeviceInfo, OverconstrainedError })
   g.webkitMediaStream = MediaStream  // webaudio/'s stub set it to its inert class (adapter.js reads it)
   if (MediaStreamAudioSourceNode) g.MediaStreamAudioSourceNode = MediaStreamAudioSourceNode

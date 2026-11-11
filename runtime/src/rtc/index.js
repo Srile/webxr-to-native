@@ -1,7 +1,10 @@
 // WebSocket and WebRTC data channels (WP-21) over __native.rtc (host/rtc/rtc_bind.cpp, libdatachannel), installed
 // only when the host was built with them (host.json network.webrtc). The browser classes as pages and libraries
 // (PeerJS, webrtc-adapter's Chrome shims) use them: WebSocket; RTCPeerConnection with data channels, offers and
-// answers, trickle ICE and the state events; RTCDataChannel; RTCSessionDescription; RTCIceCandidate. No media:
+// answers, trickle ICE and the state events; RTCDataChannel; RTCSessionDescription; RTCIceCandidate. Audio where
+// the host has it (__native.rtc.pcAddAudio: the microphone and WebRTC both on): addTransceiver('audio') and
+// addTrack, transceivers with their sender (replaceTrack: a microphone track) and receiver (a remote track, readable
+// by <audio srcObject> and MediaStreamAudioSourceNode), the track event, negotiationneeded. Otherwise no media:
 // tracks, senders and transceivers are empty, addTrack throws.
 export function install(g) {
   const N = g.__native && g.__native.rtc
@@ -96,6 +99,50 @@ export function install(g) {
     }
   }
 
+  // ---------------------------------------------------------------------------------------------- audio
+  const AUDIO = typeof N.pcAddAudio === 'function'
+  const DIRECTIONS = ['sendrecv', 'sendonly', 'recvonly', 'inactive']
+  // The direction an m-section of an SDP gives for a mid (sendrecv when it names none).
+  function sdpDirection(sdp, mid) {
+    for (const section of String(sdp ?? '').split(/\r?\nm=/).slice(1)) {
+      if (!new RegExp(`\\na=mid:${mid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\r?(\\n|$)`).test('\n' + section)) continue
+      return DIRECTIONS.find((d) => new RegExp(`\\na=${d}\\r?(\\n|$)`).test('\n' + section)) ?? 'sendrecv'
+    }
+    return null
+  }
+  class RTCRtpSender {
+    constructor(link) { this._link = link; this.track = null; this.transport = null }
+    replaceTrack(track) {
+      if (track && track.kind !== 'audio') return Promise.reject(new TypeError('replaceTrack: an audio track is required'))
+      this.track = track ?? null
+      N.audioSetSource(this._link, track && track.readyState === 'live' ? track._nid ?? 0 : 0)
+      return Promise.resolve()
+    }
+    getParameters() { return { encodings: [{ active: true }], codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 111 }], headerExtensions: [], rtcp: { reducedSize: false } } }
+    setParameters() { return Promise.resolve() }
+    getStats() { return Promise.resolve(new Map()) }
+    static getCapabilities(kind) { return kind === 'audio' ? { codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2 }], headerExtensions: [] } : null }
+  }
+  class RTCRtpReceiver {
+    constructor(track) { this.track = track; this.transport = null }
+    getParameters() { return { codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2 }], headerExtensions: [] } }
+    getStats() { return Promise.resolve(new Map()) }
+    getContributingSources() { return [] } getSynchronizationSources() { return [] }
+    static getCapabilities(kind) { return RTCRtpSender.getCapabilities(kind) }
+  }
+  class RTCRtpTransceiver {
+    constructor(pc, info, direction) {
+      this._pc = pc; this._link = info[0]; this.mid = info[2]; this._direction = direction; this._fired = false; this.stopped = false
+      const track = typeof g.__hostRemoteTrack === 'function' ? g.__hostRemoteTrack(info[1], 'remote audio') : null
+      this.sender = new RTCRtpSender(this._link); this.receiver = new RTCRtpReceiver(track)
+    }
+    get direction() { return this._direction }
+    set direction(d) { if (!DIRECTIONS.includes(d) || d === this._direction) return; this._direction = d; N.audioSetDirection(this._link, d) }
+    get currentDirection() { return this._pc._closed ? null : sdpDirection(this._pc.localDescription?.sdp, this.mid) }
+    stop() { this.stopped = true; this.direction = 'inactive'; this.sender.replaceTrack(null); this.receiver.track?._end?.(true) }
+    setCodecPreferences() {}
+  }
+
   // ---------------------------------------------------------------------------------------------- peer connections
   const ICE_DEFAULT = [{ urls: ['stun:stun.l.google.com:19302'] }]
   class RTCPeerConnection extends EventTarget {
@@ -107,11 +154,15 @@ export function install(g) {
       objects.set(this._id, this)
       this._state = { connection: 'new', ice: 'new', gathering: 'new', signaling: 'stable' }
       this.canTrickleIceCandidates = null; this._closed = false; this._channels = new Set(); this._localWaiters = []
+      this._transceivers = []; this._negotiating = false
     }
     // State and handler attributes live on the prototype, as in a browser: webrtc-adapter's shims test
     // `'connectionState' in RTCPeerConnection.prototype` and define their own over a missing one.
     get connectionState() { return this._state.connection } get iceConnectionState() { return this._state.ice }
-    get iceGatheringState() { return this._state.gathering } get signalingState() { return this._state.signaling }
+    get iceGatheringState() { return this._state.gathering }
+    // Read from native where it can be: the pc-signaling events arrive a task later, and perfect negotiation
+    // (an answer right after setRemoteDescription, the glare check) needs the state as it is now.
+    get signalingState() { return this._closed || typeof N.pcSignaling !== 'function' ? this._state.signaling : N.pcSignaling(this._id) }
     get localDescription() { const d = this._closed ? null : N.pcLocal(this._id); return d ? new RTCSessionDescription({ type: d[0], sdp: d[1] }) : null }
     get remoteDescription() { const d = this._closed ? null : N.pcRemote(this._id); return d ? new RTCSessionDescription({ type: d[0], sdp: d[1] }) : null }
     get currentLocalDescription() { return this.localDescription } get pendingLocalDescription() { return null }
@@ -130,15 +181,54 @@ export function install(g) {
       // Waits for the description event only when native made a new one (not for a rollback, or an offer it ignored).
       return this._call(() => new Promise((resolve) => { this._localWaiters.push(resolve); if (!N.pcSetLocal(this._id, type)) { this._localWaiters.splice(this._localWaiters.indexOf(resolve), 1); resolve() } }))
     }
-    setRemoteDescription(desc) { return this._call(() => { if (!desc || !desc.sdp) throw err('TypeError', 'setRemoteDescription: no SDP'); N.pcSetRemote(this._id, desc.sdp, desc.type); this._sctp = { maxMessageSize: 262144, state: 'connecting', transport: null } }) }
+    setRemoteDescription(desc) {
+      return this._call(() => {
+        if (!desc || !desc.sdp) throw err('TypeError', 'setRemoteDescription: no SDP')
+        // An offer over one not yet answered (the peer sent it again): replaced, as a browser does; libdatachannel
+        // accepts a remote offer only from stable (or over its own offer, which it rolls back).
+        if (desc.type === 'offer' && this.signalingState === 'have-remote-offer') N.pcSetRemote(this._id, '', 'rollback')
+        const added = N.pcSetRemote(this._id, desc.sdp, desc.type)
+        this._sctp = { maxMessageSize: 262144, state: 'connecting', transport: null }
+        if (!AUDIO) return
+        // Audio lines the remote offer brought: transceivers answering them (recvonly until the page says more, as
+        // a browser's are), each receiver's track announced once the remote side sends on it.
+        for (const info of Array.isArray(added) ? added : []) { N.audioSetDirection(info[0], 'recvonly'); this._transceivers.push(new RTCRtpTransceiver(this, info, 'recvonly')) }
+        for (const t of this._transceivers) {
+          const remote = sdpDirection(desc.sdp, t.mid)
+          if (t._fired || !t.receiver.track || !(remote === 'sendrecv' || remote === 'sendonly')) continue
+          t._fired = true
+          const streams = typeof g.MediaStream === 'function' ? [new g.MediaStream([t.receiver.track])] : []
+          const ev = new Event('track'); Object.assign(ev, { track: t.receiver.track, streams, receiver: t.receiver, transceiver: t })
+          this.dispatchEvent(ev)
+        }
+      })
+    }
     addIceCandidate(c) {
       return this._call(() => {
         if (!c || !c.candidate) return  // end of candidates
         N.pcAddCandidate(this._id, c.candidate.startsWith('a=') ? c.candidate.slice(2) : c.candidate, c.sdpMid ?? String(c.sdpMLineIndex ?? 0))
       })
     }
+    // negotiationneeded: once the connection is stable, after the task that changed what it carries, and only if
+    // the description in place doesn't carry it already (an answer to the peer's offer may have: a browser checks
+    // again before firing, and a needless offer collides with the peer's next one).
+    _needsNegotiation() {
+      if (this._negotiating || this._closed) return
+      this._negotiating = true
+      g.setTimeout(() => {
+        this._negotiating = false
+        if (!this._closed && this.signalingState === 'stable' && this._unnegotiated()) fire(this, 'negotiationneeded')
+      }, 0)
+    }
+    _unnegotiated() {
+      const sdp = this.localDescription?.sdp
+      if (!sdp) return true
+      if (this._channels.size && !/\nm=application /.test('\n' + sdp)) return true
+      return this._transceivers.some((t) => !t.stopped && sdpDirection(sdp, t.mid) === null)
+    }
     createDataChannel(label, init = {}) {
       this._live()
+      if (!this._channels.size && AUDIO) this._needsNegotiation()
       const dcId = N.pcCreateDataChannel(this._id, String(label ?? ''), init.ordered !== false, init.maxRetransmits ?? -1, init.maxPacketLifeTime ?? -1, !!init.negotiated, init.id ?? -1, String(init.protocol ?? ''))
       const dc = new RTCDataChannel(dcId); dc.negotiated = !!init.negotiated; this._channels.add(dc)
       return dc
@@ -148,11 +238,36 @@ export function install(g) {
       this._closed = true; Object.assign(this._state, { signaling: 'closed', connection: 'closed', ice: 'closed' })
       for (const dc of this._channels) if (dc.readyState !== 'closed') { dc.readyState = 'closed'; objects.delete(dc._id) }
       objects.delete(this._id); N.pcClose(this._id)
+      for (const t of this._transceivers) { t.stopped = true; t.receiver.track?._end?.(true) }
     }
     getStats() { return Promise.resolve(new Map()) }
-    getSenders() { return [] } getReceivers() { return [] } getTransceivers() { return [] }
-    addTrack() { throw err('NotSupportedError', 'RTCPeerConnection: no media on this host') }
-    removeTrack() {} addTransceiver() { throw err('NotSupportedError', 'RTCPeerConnection: no media on this host') }
+    getSenders() { return this._transceivers.map((t) => t.sender) }
+    getReceivers() { return this._transceivers.map((t) => t.receiver) }
+    getTransceivers() { return this._transceivers.slice() }
+    addTransceiver(kind, init = {}) {
+      this._live()
+      const k = typeof kind === 'string' ? kind : kind?.kind
+      if (!AUDIO || k !== 'audio') throw err('NotSupportedError', `RTCPeerConnection: no ${k ?? 'such'} media on this host`)
+      const direction = DIRECTIONS.includes(init.direction) ? init.direction : 'sendrecv'
+      const t = new RTCRtpTransceiver(this, N.pcAddAudio(this._id, direction), direction)
+      this._transceivers.push(t)
+      if (typeof kind === 'object' && kind) t.sender.replaceTrack(kind)
+      this._needsNegotiation()
+      return t
+    }
+    addTrack(track) {
+      this._live()
+      if (!AUDIO || track?.kind !== 'audio') throw err('NotSupportedError', 'RTCPeerConnection: no such media on this host')
+      const free = this._transceivers.find((t) => !t.stopped && !t.sender.track && (t.direction === 'recvonly' || t.direction === 'inactive' || t.direction === 'sendrecv'))
+      if (free) { if (free.direction === 'recvonly') free.direction = 'sendrecv'; else if (free.direction === 'inactive') free.direction = 'sendonly'; free.sender.replaceTrack(track); this._needsNegotiation(); return free.sender }
+      return this.addTransceiver(track, { direction: 'sendrecv' }).sender
+    }
+    removeTrack(sender) {
+      const t = this._transceivers.find((x) => x.sender === sender); if (!t) return
+      sender.replaceTrack(null)
+      t.direction = t.direction === 'sendrecv' ? 'recvonly' : t.direction === 'sendonly' ? 'inactive' : t.direction
+      this._needsNegotiation()
+    }
     restartIce() {}
     static generateCertificate() { return Promise.reject(err('NotSupportedError', 'generateCertificate is not supported')) }
     _event(kind, a, b) {
@@ -192,6 +307,10 @@ export function install(g) {
     else if (kind.startsWith('dc-')) { let q = early.get(id); if (!q) early.set(id, q = []); q.push([kind, a, b]) }
   })
 
+  if (AUDIO) for (const [name, value] of Object.entries({ RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver,
+    RTCTrackEvent: class RTCTrackEvent extends Event { constructor(t, i = {}) { super(t, i); this.track = i.track ?? null; this.streams = i.streams ?? []; this.receiver = i.receiver ?? null; this.transceiver = i.transceiver ?? null } } })) {
+    Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false })
+  }
   for (const [name, value] of Object.entries({ WebSocket, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCDataChannel,
     RTCPeerConnectionIceEvent: class RTCPeerConnectionIceEvent extends Event { constructor(t, i = {}) { super(t, i); this.candidate = i.candidate ?? null; this.url = i.url ?? null } },
     RTCDataChannelEvent: class RTCDataChannelEvent extends Event { constructor(t, i = {}) { super(t, i); this.channel = i.channel ?? null } } })) {
