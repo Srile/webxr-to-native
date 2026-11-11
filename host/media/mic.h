@@ -41,12 +41,14 @@ class MicTrack : public audio::LiveInput {
   audio::CaptureRing* ring_;
 };
 
-// A voice arriving over WebRTC (rtc/rtc_bind.cpp decodes it into the ring): read like a capture track, with more
-// margin for the network's jitter (60 ms behind the newest, at most 250 ms).
+// A voice arriving over WebRTC (rtc/rtc_bind.cpp decodes it into the ring): read like a capture track, with a
+// margin for the network's jitter that follows it (JitterTarget: 60-240 ms; readers drift to it in quiet stretches)
+// and at most 250 ms more before the oldest is dropped.
 class RemoteTrack : public audio::LiveInput {
  public:
-  RemoteTrack() : ring(0.06, 0.25) { ring.setRate(48000); }
+  RemoteTrack() : ring(jitter.target(), 0.25, true) { ring.setRate(48000); }
   std::atomic<bool> enabled{true}, ended{false};
+  audio::JitterTarget jitter;  // the receive thread's
   audio::CaptureRing ring;
   bool read(audio::LiveCursor& c, float* out, int n, double rate) override {
     if (!enabled.load(std::memory_order_relaxed) || ended.load(std::memory_order_relaxed)) { c.primed = c.waiting = false; return false; }

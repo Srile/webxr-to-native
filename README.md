@@ -187,7 +187,7 @@ leaves one off carries none of its native code or permissions, and its page does
 | `web.svg` | `false` | SVG images (nanosvg) |
 | `web.serviceWorker` | `false` | `navigator.serviceWorker`; `debug.serviceWorker` logs every load it answers |
 | `network.allow` | `[]` | origins `fetch`, XHR and WebSocket may reach; everything else is refused |
-| `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game; with `media.microphone` too, Opus audio tracks (libSRTP) |
+| `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game; with `media.microphone` too, Opus audio tracks (libSRTP; incoming voice gets a jitter margin that follows the network, in-band FEC for lost packets, and a log line every 5 s) |
 | `storage.indexedDB`, `storage.cache` | `false` | IndexedDB, the Cache API (SQLite, under the app's files) |
 | `storage.quotaMB` | `1024` | the origin's databases together; past it a write fails with `QuotaExceededError` |
 | `media.microphone` | `false` | `getUserMedia` for audio; adds the `RECORD_AUDIO` permission, asked for on first use (Android, macOS) |

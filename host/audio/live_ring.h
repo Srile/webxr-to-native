@@ -12,7 +12,12 @@
 //   - not enough samples for a quantum (the capture stalled): silence until `target` samples past where it stopped
 //     have arrived, then on from there (nothing replayed, nothing skipped).
 // The capture rate may differ from the context's: linear interpolation between neighbouring samples.
+// A network voice's ring (adaptive) also has a target that moves (JitterTarget, below): each reader drifts toward
+// it, but only on quiet quanta, so speech is never stretched or cut: below the target it holds back a quantum of
+// near silence (plays silence, takes nothing), above it by more than kSlack it skips one.
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include "audio/graph.h"
@@ -26,7 +31,8 @@ class CaptureRing {
   static constexpr double kTargetLag = 0.02, kMaxLag = 0.1;  // seconds (a microphone's)
 
   // targetLag / maxLag: a network stream's arrive in bursts (rtc/rtc_bind.cpp gives a remote voice more margin).
-  explicit CaptureRing(double targetLag = kTargetLag, double maxLag = kMaxLag) : buf_(new float[kCapacity]()), targetLag_(targetLag), maxLag_(maxLag) {}
+  explicit CaptureRing(double targetLag = kTargetLag, double maxLag = kMaxLag, bool adaptive = false)
+      : buf_(new float[kCapacity]()), targetLag_(targetLag), maxLag_(maxLag), adaptive_(adaptive) {}
   ~CaptureRing() { delete[] buf_; }
   CaptureRing(const CaptureRing&) = delete; CaptureRing& operator=(const CaptureRing&) = delete;
 
@@ -48,6 +54,11 @@ class CaptureRing {
     written_.store(w + n, std::memory_order_release);
   }
   uint64_t written() const { return written_.load(std::memory_order_acquire); }
+  // The jitter margin (seconds) readers keep: any thread; an adaptive ring's readers move to it in quiet quanta.
+  void setTargetLag(double s) { targetLag_.store(s, std::memory_order_relaxed); }
+  double targetLag() const { return targetLag_.load(std::memory_order_relaxed); }
+  static constexpr double kSlack = 0.02;    // seconds over the target an adaptive reader allows before trimming
+  static constexpr float kQuiet = 0.01f;    // a quantum's peak below this is quiet enough to hold back or skip
   uint32_t underruns() const { return underruns_.load(std::memory_order_relaxed); }
   uint32_t overruns() const { return overruns_.load(std::memory_order_relaxed); }
 
@@ -58,7 +69,7 @@ class CaptureRing {
     if (inRate <= 0 || outRate <= 0) { c.primed = false; return false; }
     const double step = inRate / outRate;
     const uint64_t span = (uint64_t)(step * n) + 2;  // input samples one quantum interpolates over
-    const uint64_t target = (uint64_t)(inRate * targetLag_) + burst_.load(std::memory_order_relaxed) + span;
+    const uint64_t target = (uint64_t)(inRate * targetLag()) + burst_.load(std::memory_order_relaxed) + span;
     const uint64_t most = target + (uint64_t)(inRate * maxLag_);
     if (!c.primed && c.waiting && c.pos <= w && w - c.pos <= most) {  // after an underrun: on from where it was
       if (w - c.pos < target) return false;
@@ -72,6 +83,14 @@ class CaptureRing {
     }
     if (w - c.pos < (uint64_t)(c.frac + step * (n - 1)) + 2) {  // the capture has not kept up: silence until it has
       underruns_.fetch_add(1, std::memory_order_relaxed); c.primed = false; c.waiting = true; return false;
+    }
+    if (adaptive_) {
+      const uint64_t lag = w - c.pos, slack = (uint64_t)(inRate * kSlack);
+      if (lag + slack / 2 < target) {
+        if (quiet(c.pos, span)) return false;  // under the target: this quiet quantum waits (the lag grows)
+      } else if (lag > target + slack + span && quiet(c.pos, 2 * span)) {
+        c.pos += span;  // over it: a quiet quantum skipped, landing in quiet too (no jump into speech)
+      }
     }
     uint64_t p = c.pos; double f = c.frac;
     constexpr uint64_t mask = kCapacity - 1;
@@ -90,11 +109,61 @@ class CaptureRing {
   }
 
  private:
+  bool quiet(uint64_t from, uint64_t count) const {
+    float peak = 0;
+    for (uint64_t i = 0; i < count; i++) peak = std::max(peak, std::fabs(buf_[(from + i) & (kCapacity - 1)]));
+    return peak < kQuiet;
+  }
+
   float* buf_;
-  const double targetLag_, maxLag_;
+  std::atomic<double> targetLag_;
+  const double maxLag_;
+  const bool adaptive_;
   std::atomic<uint64_t> written_{0};
   std::atomic<double> rate_{0};
   std::atomic<uint32_t> burst_{0}, underruns_{0}, overruns_{0};
+};
+
+// The jitter margin a network voice's ring keeps (rtc/rtc_bind.cpp feeds it each RTP packet as it arrives; the
+// ring's readers move to its target): enough for the arrival jitter seen lately, NetEq-like but simple. A packet's
+// delay is its arrival time less its place on the stream's own clock (the RTP timestamp, so concealed losses and a
+// sender's silent stretches don't count); its jitter is that delay above the lowest seen lately (which rises 2 ms a
+// second, following a path that got slower). The target is the peak jitter, decaying with a 10 s half-life, plus a
+// margin, between minLag (the fixed margin it replaces: a steady link keeps it) and maxLag. An underrun the readers report (the ring's count rose) raises the peak at once:
+// the jitter that caused it was more than the margin covered. Writer thread only.
+class JitterTarget {
+ public:
+  JitterTarget(double minLag = 0.06, double maxLag = 0.24, double margin = 0.02, double halfLife = 10)
+      : minLag_(minLag), maxLag_(maxLag), margin_(margin), halfLife_(halfLife), target_(minLag) {}
+
+  // A packet with RTP timestamp `ts` (a `clockRate` clock) arriving at `now` seconds; `underruns`: the ring's count.
+  // Returns the target lag in seconds.
+  double arrived(double now, uint32_t ts, double clockRate, uint32_t underruns) {
+    if (!started_ || now - last_ > 1.0) {  // the first packet, or a stream back after a pause: a new baseline
+      started_ = true; ext_ = 0; base_ = now; lastTs_ = ts; last_ = now; underruns_ = underruns;
+      return target_;
+    }
+    ext_ += (int32_t)(ts - lastTs_); lastTs_ = ts;
+    const double dt = now - last_, delay = now - (double)ext_ / clockRate;
+    last_ = now;
+    base_ = std::min(delay, base_ + dt * kBaseRise);
+    jitter_ = delay - base_;
+    peak_ = std::max(jitter_, peak_ * std::exp2(-dt / halfLife_));
+    if (underruns != underruns_) { peak_ = std::max(peak_, target_ - margin_ + kUnderrunStep); underruns_ = underruns; }
+    target_ = std::clamp(peak_ + margin_, minLag_, maxLag_);
+    return target_;
+  }
+  double target() const { return target_; }
+  double jitter() const { return jitter_; }  // the last packet's, seconds
+
+  static constexpr double kBaseRise = 0.002;      // s/s
+  static constexpr double kUnderrunStep = 0.02;   // s
+
+ private:
+  const double minLag_, maxLag_, margin_, halfLife_;
+  bool started_ = false;
+  int64_t ext_ = 0; uint32_t lastTs_ = 0, underruns_ = 0;
+  double base_ = 0, last_ = 0, peak_ = 0, jitter_ = 0, target_;
 };
 
 }  // namespace audio

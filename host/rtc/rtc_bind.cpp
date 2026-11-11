@@ -26,6 +26,7 @@
 #ifdef HOST_RTC_AUDIO
 #include "media/mic.h"
 #include <opus.h>
+#include "audio/voice_in.h"
 #include <chrono>
 #include <mutex>
 #include <random>
@@ -141,8 +142,11 @@ void dcInfo(const v8::FunctionCallbackInfo<v8::Value>& a) {
 // audioSetSource) is read every 20 ms on the audio-send thread, Opus-encoded (48 kHz mono, voice, in-band FEC) and
 // packetized (libdatachannel's Opus packetizer, sender reports, receiver reports for what arrives). Receiving: each
 // RTP packet is decoded on libdatachannel's thread straight into the link's RemoteTrack (media/mic.h), which the
-// page reads as the receiver's MediaStreamTrack (an <audio srcObject>, a MediaStreamAudioSourceNode). A gap in the
-// sequence is concealed (up to 5 frames); late packets are dropped.
+// page reads as the receiver's MediaStreamTrack (an <audio srcObject>, a MediaStreamAudioSourceNode): gaps filled
+// from in-band FEC and concealment, late packets dropped (audio::OpusVoiceIn). Each packet's arrival sets the ring's
+// jitter margin (audio::JitterTarget), and every 5 s a line says how the voice arrived: packets, frames recovered
+// (FEC) and concealed, late ones, the largest gap between arrivals, the margin, and the readers' underruns and
+// overruns.
 constexpr int kFrame = 960;  // 20 ms at 48 kHz
 struct AudioLink {
   int id = 0, pcId = 0; std::string mid;
@@ -152,7 +156,9 @@ struct AudioLink {
   audio::LiveInput* source = nullptr;     // the sender's track, with a reference
   audio::LiveCursor cursor; uint32_t frames = 0;
   OpusEncoder* enc = nullptr;
-  OpusDecoder* dec = nullptr; int lastSeq = -1;  // libdatachannel's receive thread
+  OpusDecoder* dec = nullptr;                    // libdatachannel's receive thread, as are these two
+  std::unique_ptr<audio::OpusVoiceIn> voice;
+  struct { uint32_t packets = 0, underruns = 0, overruns = 0; double gapMax = 0, last = 0, logged = 0; } in;
   media::RemoteTrack* remote = nullptr;   // the receiver's track (one reference held here)
   uint32_t remoteId = 0;
   ~AudioLink() {
@@ -181,17 +187,24 @@ void receive(AudioLink& l, const rtc::binary& b) {
   size_t off = 12 + 4 * (size_t)(p[0] & 0x0F);
   if (p[0] & 0x10) { if (off + 4 > n) return; off += 4 + 4 * (size_t)((p[off + 2] << 8) | p[off + 3]); }
   size_t end = n; if (p[0] & 0x20) { if (p[n - 1] > n) return; end -= p[n - 1]; }
-  if (off >= end) return;
+  if (off >= end || !l.voice) return;
   const uint16_t seq = (uint16_t)((p[2] << 8) | p[3]);
-  float pcm[5760];
-  if (l.lastSeq >= 0) {
-    const int16_t ahead = (int16_t)(uint16_t)(seq - (uint16_t)(l.lastSeq + 1));
-    if (ahead < 0) return;
-    for (int i = 0; i < std::min<int>(ahead, 5); ++i) { const int k = opus_decode_float(l.dec, nullptr, 0, pcm, kFrame, 0); if (k > 0) l.remote->ring.write(pcm, (uint32_t)k); }
+  const uint32_t ts = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | p[7];
+  media::RemoteTrack& rem = *l.remote;
+  const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  rem.ring.setTargetLag(rem.jitter.arrived(now, ts, 48000, rem.ring.underruns()));
+  auto& in = l.in;
+  if (in.last > 0) in.gapMax = std::max(in.gapMax, now - in.last);
+  in.last = now; in.packets++;
+  audio::OpusVoiceIn& v = *l.voice;
+  if (now - in.logged >= 5) {
+    const uint32_t under = rem.ring.underruns(), over = rem.ring.overruns();
+    if (in.logged > 0)
+      HOST_LOGI("rtc audio in %d: %u packets, %u recovered, %u concealed, %u late; largest gap %.0f ms; jitter margin %.0f ms; %u underruns, %u overruns",
+                l.id, in.packets, v.recovered, v.concealed, v.late, in.gapMax * 1000, rem.jitter.target() * 1000, under - in.underruns, over - in.overruns);
+    in.packets = 0; v.recovered = v.concealed = v.late = 0; in.gapMax = 0; in.logged = now; in.underruns = under; in.overruns = over;
   }
-  l.lastSeq = seq;
-  const int k = opus_decode_float(l.dec, p + off, (opus_int32)(end - off), pcm, 5760, 0);
-  if (k > 0) l.remote->ring.write(pcm, (uint32_t)k);
+  v.packet(seq, p + off, (int)(end - off), rem.ring);
 }
 
 // The send clock: every 20 ms each link with a sender track encodes what that track captured. RTP time runs on
@@ -232,7 +245,7 @@ std::shared_ptr<AudioLink> makeLink(int pcId, const std::shared_ptr<rtc::Track>&
   if ((l->enc = opus_encoder_create(48000, 1, OPUS_APPLICATION_VOIP, &e))) {
     opus_encoder_ctl(l->enc, OPUS_SET_BITRATE(32000)); opus_encoder_ctl(l->enc, OPUS_SET_INBAND_FEC(1)); opus_encoder_ctl(l->enc, OPUS_SET_PACKET_LOSS_PERC(5));
   }
-  l->dec = opus_decoder_create(48000, 1, &e);
+  if ((l->dec = opus_decoder_create(48000, 1, &e))) l->voice = std::make_unique<audio::OpusVoiceIn>(l->dec);
   l->remote = new media::RemoteTrack();
   std::weak_ptr<AudioLink> weak = l;
   track->onMessage([weak](rtc::binary b) { if (auto x = weak.lock()) receive(*x, b); }, nullptr);
