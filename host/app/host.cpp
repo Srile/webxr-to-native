@@ -456,9 +456,16 @@ void Host::xrTick() {
   if (f.shouldRender) captureShots(&f);
   // With the GL thread on, this waits for the frame's commands to run, then submits (end = the GL tail).
   glq::sync("endFrame", [&] { if (jsUp_) glBindFramebuffer(GL_FRAMEBUFFER, 0); xr_.endFrame(f, f.shouldRender); });
+  const double t2 = loop_.now();
   gc_.setInFrame(false);
   if (jsUp_) gc_.afterSubmit();  // the next frame starts with an emptied young generation when it was filling up
-  endMs_ += loop_.now() - t1;
+  const double t3 = loop_.now();
+  endMs_ += t3 - t1;
+  // Diagnostics (__native.gl.debugSlowOps): a frame that took longer than the threshold, start to start, in parts:
+  // the event loop's other work since the last frame, xrWaitFrame + begin, the page's frame, the submit, the GC.
+  if (const uint64_t slow = glq::slowLogUs(); slow && lastFrameStart_ > 0 && (tw - lastFrameStart_) * 1000 >= (double)slow)
+    HOST_LOGW("xr frame %.1f ms since the last: between %.1f, wait %.1f, js %.1f, end %.1f, gc %.1f ms", tw - lastFrameStart_, tw - lastFrameEnd_, t0 - tw, t1 - t0, t2 - t1, t3 - t2);
+  lastFrameStart_ = tw; lastFrameEnd_ = t3;
   stats(&f);
 }
 

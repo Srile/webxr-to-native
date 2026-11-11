@@ -320,6 +320,10 @@ node tools/device.mjs log                        # logcat: tag webxr-host, the p
 node tools/profile.mjs 10                        # a 10 s CPU profile, summarised per function
 ```
 
+A frame that hitches: `node tools/bridge.mjs eval '__native.gl.debugSlowOps(8)'` makes the host log, from then on, every
+XR frame over 8 ms start to start in parts (the event loop's other work, the wait, the page's frame, the submit, the
+GC) and any single command the GL thread takes longer than that over; `0` turns it off.
+
 `HOST_LOCAL=1` points the bridge and profiler at a host on this machine (macOS, Windows, Linux, the iOS
 simulator). On the Quest a debug build accepts inspector connections from the local network, not only through
 `adb forward`, so don't hand out debug builds.

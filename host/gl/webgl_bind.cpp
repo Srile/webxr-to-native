@@ -452,6 +452,8 @@ void f_compressedTexSubImage3D(const Args& a) {
 }
 // drawCount(): wgl::drawCalls (a double: exact far past any session's count).
 void f_drawCount(const Args& a) { glq::finish(); a.GetReturnValue().Set((double)wgl::drawCalls.load()); }  // after the queued draws ran
+// debugSlowOps(ms): the GL thread logs any one command that takes longer (0: off), for finding a frame's hitch.
+void f_debugSlowOps(const Args& a) { glq::setSlowLogUs((uint64_t)(std::max(0.0, bind::num(a, 0, 0)) * 1000)); }
 // clearDrawingBuffer(framebuffer, mask): a browser's implicit clear of a canvas's drawing buffer after it was presented
 // (preserveDrawingBuffer false): colour 0, depth 1, stencil 0, whatever the page's masks, scissor and clear values are,
 // all of which (and the draw binding) are put back. Pages that never clear the default framebuffer themselves
@@ -1085,7 +1087,7 @@ void installWebGL(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Host
     {"clientWaitSync", f_clientWaitSync}, {"waitSync", f_waitSync}, {"getSyncParameter", f_getSyncParameter},
     {"multiDrawArraysWEBGL", f_multiDrawArraysWEBGL}, {"multiDrawElementsWEBGL", f_multiDrawElementsWEBGL},
     {"multiDrawArraysInstancedWEBGL", f_multiDrawArraysInstancedWEBGL}, {"multiDrawElementsInstancedWEBGL", f_multiDrawElementsInstancedWEBGL},
-    {"multiDrawElementsIndirect", f_multiDrawElementsIndirect}, {"multiDrawArraysIndirect", f_multiDrawArraysIndirect}, {"multiDrawInfo", f_multiDrawInfo}, {"clearDrawingBuffer", f_clearDrawingBuffer}, {"clearFrame", f_clearFrame}, {"drawCount", f_drawCount},
+    {"multiDrawElementsIndirect", f_multiDrawElementsIndirect}, {"multiDrawArraysIndirect", f_multiDrawArraysIndirect}, {"multiDrawInfo", f_multiDrawInfo}, {"clearDrawingBuffer", f_clearDrawingBuffer}, {"clearFrame", f_clearFrame}, {"drawCount", f_drawCount}, {"debugSlowOps", f_debugSlowOps},
   };
   for (auto& h : hand) wgl::installFn(ctx, gl, h.name, h.cb);
   // The GL thread's decoders, and the ring for the JS encoders (runtime/src/webgl/queue.gen.js).
