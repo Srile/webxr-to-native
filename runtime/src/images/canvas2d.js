@@ -124,16 +124,43 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   }
   let textNative = null, textFace = null, textSpacing = 0   // set by __textSetup for the call that follows it
   const clampPx = new Uint8ClampedArray(4)   // rounds/clamps a filtered pixel exactly as a Uint8ClampedArray store does
+  // A canvas's pixels as 32-bit words, for filling opaque spans a pixel at a time.
+  const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
+  const wordViews = new WeakMap()
+  const words = (buf) => {
+    let w = wordViews.get(buf)
+    if (!w) { w = new Uint32Array(buf.buffer, buf.byteOffset, buf.length >> 2); wordViews.set(buf, w) }
+    return w
+  }
 
   // Source-over of one constant colour (a in 0..255, fractional allowed) over buf[i, end):
   // blendPixel inlined over a span, byte-identical to it.
   function blendSpan(buf, i, end, r, gg, b, a) {
     if (a <= 0) return
-    if (a >= 255) { for (; i < end; i += 4) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = 255 } return }
+    if (a >= 255) {
+      // Opaque: one 32-bit fill (the bytes a Uint8ClampedArray store would write: rounded and clamped).
+      if (end - i >= 32 && LITTLE_ENDIAN && (buf.byteOffset & 3) === 0) {
+        clampPx[0] = r; clampPx[1] = gg; clampPx[2] = b; clampPx[3] = 255
+        words(buf).fill(clampPx[0] | clampPx[1] << 8 | clampPx[2] << 16 | 0xFF000000, i >> 2, end >> 2)
+        return
+      }
+      for (; i < end; i += 4) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = 255 }
+      return
+    }
     const sa = a / 255, ia = 1 - sa, rs = r * sa, gs = gg * sa, bs = b * sa
+    // Over transparent pixels the colour is written as it is: a run of them takes one 32-bit fill.
+    const fast = end - i >= 32 && LITTLE_ENDIAN && (buf.byteOffset & 3) === 0
+    let word = 0
+    if (fast) { clampPx[0] = r; clampPx[1] = gg; clampPx[2] = b; clampPx[3] = a; word = (clampPx[0] | clampPx[1] << 8 | clampPx[2] << 16 | clampPx[3] << 24) >>> 0 }
     for (; i < end; i += 4) {
       const da = buf[i + 3]
-      if (da === 0) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = a; continue }
+      if (da === 0) {
+        if (fast) {
+          let j = i + 4; while (j < end && buf[j + 3] === 0) j += 4
+          words(buf).fill(word, i >> 2, j >> 2); i = j - 4; continue
+        }
+        buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = a; continue
+      }
       const k = (da / 255) * ia, oa = sa + k
       buf[i] = Math.round((rs + buf[i] * k) / oa)
       buf[i + 1] = Math.round((gs + buf[i + 1] * k) / oa)
@@ -144,7 +171,12 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   // blendSpan for source-over; copy replaces the span, destination-out punches its alpha (the colour is unused) and
   // destination-over puts the colour under it.
   function paintSpan(buf, i, end, r, gg, b, a, mode) {
-    if (mode === 3) { for (; i < end; i += 4) underPixel(buf, i, r, gg, b, a); return }
+    if (mode === 3) {
+      // Destination-over: what is already opaque stays (most of a panel painted under its contents), skipped here.
+      if (a <= 0) return
+      for (; i < end; i += 4) if (buf[i + 3] < 255) underPixel(buf, i, r, gg, b, a)
+      return
+    }
     if (mode === 1) { const aa = a >= 255 ? 255 : a <= 0 ? 0 : Math.round(a); for (; i < end; i += 4) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = aa } return }
     if (mode === 2) {
       if (a <= 0) return
@@ -159,6 +191,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   // A gradient's colours are looked up in a table of this many steps along t, built once per set of stops: a
   // menu's gradient-filled buttons cost ~90% of a repaint when every pixel searched and interpolated its stops.
   const GRADIENT_STEPS = 4096
+  const RAMP_TABLES = 64, rampTables = new Map()   // 64 KB each
   class CanvasGradient {
     constructor(kind, p) { this.__kind = kind; this.__p = p; this.__stops = []; this.__table = null }
     addColorStop(offset, color) {
@@ -167,10 +200,17 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       this.__stops.push([offset, c]); this.__stops.sort((a, b) => a[0] - b[0]); this.__table = null
     }
     // RGBA (alpha 0..255, unrounded) at GRADIENT_STEPS points of t in 0..1.
+    // Shared by every gradient with the same stops (a UI makes a new gradient per button per repaint, the same few
+    // over and over): the most recent RAMP_TABLES sets of stops are kept.
     __lut() {
       if (this.__table) return this.__table
-      const table = new Float32Array(GRADIENT_STEPS * 4), out = [0, 0, 0, 0]
+      const key = this.__stops.map(([o, c]) => o + ':' + c[0] + ',' + c[1] + ',' + c[2] + ',' + c[3]).join(';')
+      let table = rampTables.get(key)
+      if (table) { rampTables.delete(key); rampTables.set(key, table); return (this.__table = table) }
+      table = new Float32Array(GRADIENT_STEPS * 4); const out = [0, 0, 0, 0]
       for (let i = 0; i < GRADIENT_STEPS; i++) { this.__ramp(i / (GRADIENT_STEPS - 1), out); table[i * 4] = out[0]; table[i * 4 + 1] = out[1]; table[i * 4 + 2] = out[2]; table[i * 4 + 3] = out[3] }
+      rampTables.set(key, table)
+      if (rampTables.size > RAMP_TABLES) rampTables.delete(rampTables.keys().next().value)
       return (this.__table = table)
     }
     // Spec parameter t for a user-space point, or NaN where the gradient paints nothing.
@@ -771,7 +811,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       if (!grad && c[3] * alpha <= 0 && mode !== 1 && !colour) return
       const paint = (px, py, di, cov) => {
         if (grad) {
-          const u = this.__inv(px + 0.5, py + 0.5); grad.__colorAt(u[0], u[1], gradPx)
+          this.__gradAt(grad, px, py, gradPx)
           compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov / 255, mode)
         } else compositePixel(buf, di, c[0], c[1], c[2], c[3] * alpha * cov / 255, mode)
       }
@@ -960,7 +1000,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
         if (!this.__covers(px, py)) return
         const di = (py * cw + px) * 4
         if (solid) compositePixel(buf, di, solid[0], solid[1], solid[2], solid[3] * alpha * cov, mode)
-        else { const u = this.__inv(px + 0.5, py + 0.5); grad.__colorAt(u[0], u[1], gradPx); compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov, mode) }
+        else { this.__gradAt(grad, px, py, gradPx); compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov, mode) }
       }, rows ? rows[1] : 0, rows ? rows[3] : ch)
     }
     // A stroke is filled as its outline: a quad per segment, a disc at each joint and end for round joins and caps
@@ -1126,18 +1166,45 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     }
     isPointInPath() { return false }
     // Gradient fill of a device-space span: the colour at each pixel centre, mapped back to user space.
+    // A gradient's colour at device pixel (px, py) into out: __inv + __colorAt, the same arithmetic, without their
+    // array for an unrotated linear gradient (the common case: per edge pixel of a gradient-filled shape).
+    __gradAt(grad, px, py, out) {
+      if (grad.__kind === 'linear' && grad.__stops.length && !this.__rotated()) {
+        const p = grad.__p, dx = p[2] - p[0], dy = p[3] - p[1], d = dx * dx + dy * dy
+        const t = d === 0 ? NaN : ((((px + 0.5) - this.__tx) / this.__sx - p[0]) * dx + (((py + 0.5) - this.__ty) / this.__sy - p[1]) * dy) / d
+        if (Number.isNaN(t)) { out[0] = out[1] = out[2] = out[3] = 0; return }
+        const table = grad.__lut(), i = (((t < 0 ? 0 : t > 1 ? 1 : t) * (GRADIENT_STEPS - 1) + 0.5) | 0) * 4
+        out[0] = table[i]; out[1] = table[i + 1]; out[2] = table[i + 2]; out[3] = table[i + 3]
+        return
+      }
+      const u = this.__inv(px + 0.5, py + 0.5); grad.__colorAt(u[0], u[1], out)
+    }
     __fillGradientSpan(buf, x0, y0, x1, y1) {
       const grad = this.__fillGrad, cw = this.canvas.__w, out = gradPx, alpha = this.__alpha, mode = this.__mode()
       // A linear gradient's t steps evenly along a row (the transform only scales and translates): no per-pixel search.
       const p = grad.__p, dx = p[2] - p[0], dy = p[3] - p[1], d = dx * dx + dy * dy
       if (grad.__kind === 'linear' && d > 0 && grad.__stops.length && !this.__rotated()) {
         const table = grad.__lut(), n1 = GRADIENT_STEPS - 1, step = dx / this.__sx / d
+        // Pixels that look up the same table entry are painted as one span: a vertical gradient's whole row (its
+        // t is the same along it), a slanted one's runs. The same t, pixel by pixel, as one at a time would see.
+        const index = (t) => (((t < 0 ? 0 : t > 1 ? 1 : t) * n1 + 0.5) | 0) * 4
         for (let py = y0; py < y1; py++) {
           const uy = (py + 0.5 - this.__ty) / this.__sy
           let t = (((x0 + 0.5 - this.__tx) / this.__sx - p[0]) * dx + (uy - p[1]) * dy) / d
-          for (let px = x0, di = (py * cw + x0) * 4; px < x1; px++, di += 4, t += step) {
-            const i = (((t < 0 ? 0 : t > 1 ? 1 : t) * n1 + 0.5) | 0) * 4, a = table[i + 3] * alpha
-            if (a > 0 || mode === 1) compositePixel(buf, di, table[i], table[i + 1], table[i + 2], a, mode)
+          const row = py * cw * 4
+          if (step === 0) {
+            const i = index(t), a = table[i + 3] * alpha
+            if (a > 0 || mode === 1) paintSpan(buf, row + x0 * 4, row + x1 * 4, table[i], table[i + 1], table[i + 2], a, mode)
+            continue
+          }
+          let px = x0, i = index(t)
+          while (px < x1) {
+            let end = px + 1, j = -1
+            t += step
+            while (end < x1) { j = index(t); if (j !== i) break; end++; t += step }
+            const a = table[i + 3] * alpha
+            if (a > 0 || mode === 1) paintSpan(buf, row + px * 4, row + end * 4, table[i], table[i + 1], table[i + 2], a, mode)
+            px = end; i = j
           }
         }
         return

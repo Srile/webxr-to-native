@@ -106,6 +106,20 @@ export function blit(dst, dstW, dstH, src, srcW, srcH, sx, sy, sw, sh, dx, dy, d
   const mask = clip && clip.kind === 'mask' ? clip : null
   if (Array.isArray(clip)) { x0 = Math.max(x0, clip[0]); y0 = Math.max(y0, clip[1]); x1 = Math.min(x1, clip[2]); y1 = Math.min(y1, clip[3]) }
   if (x1 <= x0 || y1 <= y0) return
+  // An unscaled, unmirrored copy at whole pixels, nothing masked: each row copied as it is (what compositePixel's
+  // copy does pixel by pixel: the source bytes, its alpha included).
+  if (mode === 1 && alpha >= 1 && !mask && !mirrorX && !mirrorY && dw === sw && dh === sh &&
+      Number.isInteger(dx) && Number.isInteger(dy) && Number.isInteger(sx) && Number.isInteger(sy)) {
+    const ox = sx - dx, oy = sy - dy
+    const cx0 = Math.max(x0, -ox), cx1 = Math.min(x1, srcW - ox), cy0 = Math.max(y0, -oy), cy1 = Math.min(y1, srcH - oy)
+    if (cx0 === x0 && cx1 === x1 && cy0 === y0 && cy1 === y1) {
+      for (let py = y0; py < y1; py++) {
+        const si = ((py + oy) * srcW + x0 + ox) * 4
+        dst.set(src.subarray(si, si + (x1 - x0) * 4), (py * dstW + x0) * 4)
+      }
+      return
+    }
+  }
   for (let py = y0; py < y1; py++) {
     let v = (py + 0.5 - dy) / dh
     if (v < 0 || v >= 1) continue

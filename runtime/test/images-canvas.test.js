@@ -374,6 +374,24 @@ test('canvas 2d: Path2D from SVG path data fills and strokes', () => {
   assert.equal(px(c.__rgba, 4, 2, 3)[2], 255)
 })
 
+test('drawImage with copy at 1:1 copies the pixels as they are, alpha included, inside the clip', () => {
+  const g = freshGlobal()
+  const src = new g.OffscreenCanvas(4, 3), s = src.getContext('2d')
+  s.fillStyle = 'rgba(200, 40, 10, 0.4)'; s.fillRect(0, 0, 4, 3); s.fillStyle = '#00ff00'; s.fillRect(1, 1, 1, 1)
+  const dst = new g.OffscreenCanvas(6, 5), d = dst.getContext('2d')
+  d.fillStyle = '#0000ff'; d.fillRect(0, 0, 6, 5)
+  d.globalCompositeOperation = 'copy'
+  d.drawImage(src, 1, 1)
+  assert.deepEqual(px(dst.__rgba, 6, 1, 1), px(src.__rgba, 4, 0, 0), 'translucent source copied, not blended')
+  assert.deepEqual(px(dst.__rgba, 6, 2, 2), [0, 255, 0, 255])
+  assert.deepEqual(px(dst.__rgba, 6, 0, 0), [0, 0, 255, 255], 'outside the image: untouched')
+  d.save(); d.beginPath(); d.rect(0, 0, 2, 5); d.clip()
+  d.globalCompositeOperation = 'source-over'; d.fillStyle = '#0000ff'; d.fillRect(0, 0, 6, 5)
+  d.globalCompositeOperation = 'copy'; d.drawImage(src, 1, 1); d.restore()
+  assert.deepEqual(px(dst.__rgba, 6, 1, 1), px(src.__rgba, 4, 0, 0), 'inside the clip: copied')
+  assert.deepEqual(px(dst.__rgba, 6, 3, 1), px(src.__rgba, 4, 2, 0), 'outside the clip: from the first copy')
+})
+
 test('canvas 2d: Path2D reads the S, Q and T curve commands (and draws what follows them)', () => {
   const g = freshGlobal()
   const raster = (d) => {
