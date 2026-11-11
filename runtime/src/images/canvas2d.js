@@ -67,6 +67,20 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   let textRgba = new Uint8Array(0)   // colour emoji (textBox[4]): RGBA, straight alpha, grown when text has any
   let boldA = new Uint8Array(0), boldT = new Uint8Array(0), boldRgba = new Uint8Array(0)
 
+  // Rasterised text, kept by everything that shapes it (face, size, scale, quarter-pixel phase, weight, the string):
+  // a menu repainting a hovered button draws the same labels again, and a raster (and its synthetic bold) costs far
+  // more than a copy. At most 256 entries and 4 MB of coverage, the least recently used dropped first.
+  const textCache = new Map()
+  let textCacheBytes = 0
+  const cacheGet = (key) => { const e = textCache.get(key); if (e) { textCache.delete(key); textCache.set(key, e) } return e }
+  const cachePut = (key, e) => {
+    textCache.set(key, e); textCacheBytes += e.A.length + (e.RGBA ? e.RGBA.length : 0)
+    while (textCache.size > 256 || textCacheBytes > 4 << 20) {
+      const [k, old] = textCache.entries().next().value
+      textCache.delete(k); textCacheBytes -= old.A.length + (old.RGBA ? old.RGBA.length : 0)
+    }
+  }
+
   // Synthetic bold for a face that has no heavier weight (the platform's): the coverage dilated by r device pixels
   // (whole rings, then the fraction of one more), padded so nothing is cut off. Colour emoji are padded, not grown.
   function embolden(a, w, h, r, rgba) {
@@ -726,20 +740,32 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       const n = textNative, f = textFace
       // Text the clip can't reach (with a font size of margin all round) is never rasterised.
       if (this.__clip && !rotated) { const pad = f.px * Math.max(sx, sy); if (this.__clipMisses(ox - pad, oy - 1.5 * pad, ox + width * sx + pad, oy + pad)) return }
-      if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, sx, sy, ox, oy, text, textAlpha, textBox, textRgba)) {
-        const need = textBox[0] * textBox[1], colour = textBox[4] === 1
-        if (need <= textAlpha.length && (!colour || need * 4 <= textRgba.length)) return   // nothing inked
-        if (need > textAlpha.length) textAlpha = new Uint8Array(Math.max(need, textAlpha.length * 2))
-        if (colour && need * 4 > textRgba.length) textRgba = new Uint8Array(Math.max(need * 4, textRgba.length * 2))
-        if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, sx, sy, ox, oy, text, textAlpha, textBox, textRgba)) return
+      // Rasterised at the pen's quarter-pixel phase, placed at its whole pixel: the cache's entries move with the text.
+      let ix = Math.floor(ox), iy = Math.floor(oy), qx = Math.round((ox - ix) * 4) / 4, qy = Math.round((oy - iy) * 4) / 4
+      if (qx === 1) { ix++; qx = 0 }
+      if (qy === 1) { iy++; qy = 0 }
+      const key = `${f.id}|${f.fallback}|${f.px}|${textSpacing}|${sx}|${sy}|${qx}|${qy}|${f.bold || 0}|${text}`
+      let entry = cacheGet(key)
+      if (!entry) {
+        if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, sx, sy, qx, qy, text, textAlpha, textBox, textRgba)) {
+          const need = textBox[0] * textBox[1], colour = textBox[4] === 1
+          if (need <= textAlpha.length && (!colour || need * 4 <= textRgba.length)) return   // nothing inked
+          if (need > textAlpha.length) textAlpha = new Uint8Array(Math.max(need, textAlpha.length * 2))
+          if (colour && need * 4 > textRgba.length) textRgba = new Uint8Array(Math.max(need * 4, textRgba.length * 2))
+          if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, sx, sy, qx, qy, text, textAlpha, textBox, textRgba)) return
+        }
+        let w = textBox[0], h = textBox[1], bx = textBox[2], by = textBox[3], A = textAlpha, RGBA = textRgba
+        const colour = textBox[4] === 1
+        // A weight the face doesn't have (600 on the platform's regular face): grown by about 3.5% of the em at bold.
+        if (f.bold > 0) {
+          const r = f.bold * f.px * sy * 0.035
+          if (r >= 0.2) { const b = embolden(A, w, h, r, colour ? RGBA : null); A = b.a; RGBA = b.rgba || RGBA; bx -= b.pad; by -= b.pad; w = b.w; h = b.h }
+        }
+        entry = { w, h, bx, by, A: A.slice(0, w * h), RGBA: colour ? RGBA.slice(0, w * h * 4) : null }
+        cachePut(key, entry)
       }
-      let w = textBox[0], h = textBox[1], bx = textBox[2], by = textBox[3], A = textAlpha, RGBA = textRgba
-      const colour = textBox[4] === 1
-      // A weight the face doesn't have (600 on the platform's regular face): grown by about 3.5% of the em at bold.
-      if (f.bold > 0) {
-        const r = f.bold * f.px * sy * 0.035
-        if (r >= 0.2) { const b = embolden(A, w, h, r, colour ? RGBA : null); A = b.a; RGBA = b.rgba || RGBA; bx -= b.pad; by -= b.pad; w = b.w; h = b.h }
-      }
+      const w = entry.w, h = entry.h, bx = entry.bx + ix, by = entry.by + iy, A = entry.A, RGBA = entry.RGBA
+      const colour = RGBA !== null
       const cw = this.canvas.__w, ch = this.canvas.__h
       const grad = this.__fillGrad, c = this.__fillRgba, alpha = this.__alpha, mode = this.__mode()
       if (!grad && c[3] * alpha <= 0 && mode !== 1 && !colour) return
