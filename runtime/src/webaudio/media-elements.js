@@ -15,6 +15,9 @@ export function installMediaElements(g, AudioContext) {
     if (ctx.state === 'suspended') ctx.resume()
     return ctx
   }
+  // Made now, as the page loads, not at the first play(): a context opens an audio output stream, ~50 ms on
+  // some devices (a headset's Android layer), which in the middle of an XR session is several dropped frames.
+  try { ctx = new AudioContext() } catch { ctx = null }
   const decoded = new Map()   // absolute URL → Promise<AudioBuffer>
   const decode = (url) => {
     let p = decoded.get(url)

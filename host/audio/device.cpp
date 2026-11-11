@@ -68,10 +68,16 @@ RealtimeContext* RealtimeContext::create(uint32_t chunkSize, double preferredRat
    ->setSharingMode(oboe::SharingMode::Shared)->setFormat(oboe::AudioFormat::Float)->setChannelCount(2)
    ->setUsage(oboe::Usage::Game)->setFormatConversionAllowed(true)->setChannelConversionAllowed(true);
   if (preferredRate > 0) b.setSampleRate((int32_t)preferredRate)->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium);
-  std::shared_ptr<oboe::AudioStream> probe;
-  oboe::Result r = b.openStream(probe);
-  if (r == oboe::Result::OK && probe) { rate = probe->getSampleRate(); probe->close(); }
-  else HOST_LOGE("audio: openStream failed: %s", oboe::convertToText(r));
+  // The device's rate for this request, probed once: opening a stream to ask costs as much as the real one
+  // (~25 ms each where the output goes through another audio server), and every new context asked again.
+  static double probedFor = -1, probedRate = 0;
+  if (probedFor == preferredRate && probedRate > 0) rate = probedRate;
+  else {
+    std::shared_ptr<oboe::AudioStream> probe;
+    oboe::Result r = b.openStream(probe);
+    if (r == oboe::Result::OK && probe) { rate = probe->getSampleRate(); probe->close(); probedFor = preferredRate; probedRate = rate; }
+    else HOST_LOGE("audio: openStream failed: %s", oboe::convertToText(r));
+  }
 #endif
   RealtimeContext* c = new RealtimeContext(rate, chunkSize);
   c->preferredRate_ = preferredRate;
