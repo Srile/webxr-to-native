@@ -435,6 +435,46 @@ test('destination-out fades to transparent and copy replaces with the source, tr
   assert.equal(px(c.__rgba, 8, 7, 1)[0], 255)
 })
 
+test('a clip limits fills to what it shows: paths outside it are skipped, paths across it keep their edge', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(40, 40), ctx = c.getContext('2d')
+  ctx.beginPath(); ctx.rect(10, 10, 10, 10); ctx.clip()
+  ctx.fillStyle = '#ff0000'; ctx.beginPath(); ctx.arc(32, 32, 4, 0, Math.PI * 2); ctx.fill()   // outside the clip
+  assert.deepEqual(px(c.__rgba, 40, 32, 32), [0, 0, 0, 0])
+  ctx.fillStyle = '#00ff00'; ctx.beginPath(); ctx.arc(20, 20, 15, 0, Math.PI * 2); ctx.fill()   // across it
+  assert.deepEqual(px(c.__rgba, 40, 15, 15), [0, 255, 0, 255])
+  assert.deepEqual(px(c.__rgba, 40, 25, 25), [0, 0, 0, 0], 'still clipped')
+})
+
+test('a linear gradient fill matches its stops pixel by pixel (the table and the stepped span)', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(256, 2), ctx = c.getContext('2d')
+  const grad = ctx.createLinearGradient(0, 0, 256, 0)
+  grad.addColorStop(0, '#000000'); grad.addColorStop(1, '#ffffff')
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 2)
+  for (const x of [0, 64, 128, 200, 255]) assert.ok(Math.abs(px(c.__rgba, 256, x, 1)[0] - (x + 0.5)) <= 1, `x ${x}: ${px(c.__rgba, 256, x, 1)[0]}`)
+  // Scaled, the same ramp in device pixels.
+  const d = new g.OffscreenCanvas(256, 2), dtx = d.getContext('2d')
+  dtx.scale(2, 1); const half = dtx.createLinearGradient(0, 0, 128, 0)
+  half.addColorStop(0, '#000000'); half.addColorStop(1, '#ffffff')
+  dtx.fillStyle = half; dtx.fillRect(0, 0, 128, 2)
+  for (const x of [10, 128, 250]) assert.ok(Math.abs(px(d.__rgba, 256, x, 0)[0] - px(c.__rgba, 256, x, 0)[0]) <= 1, `scaled x ${x}`)
+})
+
+test('destination-over draws under what is there: a panel ground behind its text', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(8, 4), ctx = c.getContext('2d')
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 4, 4)            // the "text", left half
+  ctx.globalCompositeOperation = 'destination-over'
+  assert.equal(ctx.globalCompositeOperation, 'destination-over')
+  ctx.fillStyle = 'rgba(0,0,255,0.5)'; ctx.fillRect(0, 0, 8, 4)  // the ground, everywhere
+  assert.deepEqual(px(c.__rgba, 8, 1, 1), [255, 255, 255, 255], 'opaque content stays on top')
+  assert.deepEqual(px(c.__rgba, 8, 6, 1), [0, 0, 255, 128], 'empty pixels take the ground')
+  ctx.beginPath(); ctx.arc(6, 2, 2, 0, Math.PI * 2); ctx.fillStyle = '#ff0000'; ctx.fill()
+  // Blue at alpha 128/255 over red: a near-even mix, now opaque.
+  assert.deepEqual(px(c.__rgba, 8, 6, 2), [127, 0, 128, 255], 'a path under a half-transparent pixel stays behind it')
+})
+
 test('canvas 2d: stroke draws a line of lineWidth, round caps, the stroke colour', async () => {
   const { makeCanvas } = await import('../src/images/canvas2d.js')
   const g = { document: null }; const { HTMLCanvasElement } = makeCanvas(g, { EventTargetBase: class {}, ImageData: class { constructor(d, w, h) { this.data = d; this.width = w; this.height = h } }, ImageBitmap: class {}, newBitmap: () => null, warnOnce: () => {}, defer: (f) => f() })
@@ -445,4 +485,77 @@ test('canvas 2d: stroke draws a line of lineWidth, round caps, the stroke colour
   assert.deepEqual(px(20, 10), [255, 0, 0, 255]); assert.deepEqual(px(20, 8), [255, 0, 0, 255]); assert.deepEqual(px(20, 4), [0, 0, 0, 0])
   assert.deepEqual(px(8, 10), [255, 0, 0, 255])   // the round cap past the start
   assert.deepEqual(px(35, 10), [0, 0, 0, 0])
+})
+
+async function canvas2d(w, h) {
+  const { makeCanvas } = await import('../src/images/canvas2d.js')
+  const g = { document: null }; const { HTMLCanvasElement } = makeCanvas(g, { EventTargetBase: class {}, ImageData: class { constructor(d, w, h) { this.data = d; this.width = w; this.height = h } }, ImageBitmap: class {}, newBitmap: () => null, warnOnce: () => {}, defer: (f) => f() })
+  const c = new HTMLCanvasElement(); c.width = w; c.height = h
+  const at = (x, y) => c.__rgba[(y * w + x) * 4 + 3]
+  return { c, ctx: c.getContext('2d'), at }
+}
+
+test('canvas 2d: setLineDash leaves gaps along a stroke (dashed outlines)', async () => {
+  const { ctx, at } = await canvas2d(60, 10)
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2
+  ctx.setLineDash([10, 5]); assert.deepEqual(ctx.getLineDash(), [10, 5])
+  ctx.beginPath(); ctx.moveTo(0, 5); ctx.lineTo(60, 5); ctx.stroke()
+  assert.equal(at(5, 5), 255); assert.equal(at(12, 5), 0); assert.equal(at(17, 5), 255); assert.equal(at(27, 5), 0)
+  // An odd list repeats; a bad one is ignored; save/restore keep it.
+  ctx.setLineDash([4]); assert.deepEqual(ctx.getLineDash(), [4, 4])
+  ctx.setLineDash([3, -1]); assert.deepEqual(ctx.getLineDash(), [4, 4])
+  ctx.save(); ctx.setLineDash([]); ctx.restore(); assert.deepEqual(ctx.getLineDash(), [4, 4])
+  // The offset shifts the pattern along.
+  const b = await canvas2d(60, 10)
+  b.ctx.strokeStyle = '#fff'; b.ctx.lineWidth = 2; b.ctx.setLineDash([10, 5]); b.ctx.lineDashOffset = 5
+  b.ctx.beginPath(); b.ctx.moveTo(0, 5); b.ctx.lineTo(60, 5); b.ctx.stroke()
+  assert.equal(at(7, 5), 255); assert.equal(b.at(7, 5), 0); assert.equal(b.at(2, 5), 255)
+})
+
+test('canvas 2d: roundRect rounds its corners (one radius or a list), arcTo rounds a corner', async () => {
+  const { ctx, at } = await canvas2d(40, 40)
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.roundRect(0, 0, 40, 40, 12); ctx.fill()
+  assert.equal(at(0, 0), 0); assert.equal(at(39, 39), 0); assert.equal(at(20, 20), 255); assert.equal(at(20, 0), 255); assert.equal(at(1, 20), 255)
+  const b = await canvas2d(40, 40)
+  b.ctx.fillStyle = '#fff'; b.ctx.beginPath(); b.ctx.roundRect(0, 0, 40, 40, [12, 0]); b.ctx.fill()
+  assert.equal(b.at(0, 0), 0); assert.equal(b.at(39, 0), 255); assert.equal(b.at(39, 39), 0); assert.equal(b.at(0, 39), 255)
+  assert.throws(() => b.ctx.roundRect(0, 0, 4, 4, -1), RangeError)
+  const a = await canvas2d(40, 40)
+  a.ctx.fillStyle = '#fff'; a.ctx.beginPath(); a.ctx.moveTo(0, 0); a.ctx.arcTo(40, 0, 40, 40, 16); a.ctx.lineTo(40, 40); a.ctx.lineTo(0, 40); a.ctx.closePath(); a.ctx.fill()
+  assert.equal(a.at(39, 0), 0); assert.equal(a.at(20, 1), 255); assert.equal(a.at(38, 20), 255)
+})
+
+test('canvas 2d: fills are anti-aliased at their edges, and a rectangle on whole pixels stays exact', async () => {
+  const { ctx, c } = await canvas2d(40, 40)
+  ctx.fillStyle = '#fff'
+  ctx.beginPath(); ctx.arc(20, 20, 12.3, 0, Math.PI * 2); ctx.fill()
+  const alphas = new Set()
+  for (let i = 3; i < c.__rgba.length; i += 4) alphas.add(c.__rgba[i])
+  assert.ok([...alphas].some(a => a > 0 && a < 255), 'partly covered edge pixels')
+  const b = await canvas2d(10, 10)
+  b.ctx.fillStyle = '#fff'; b.ctx.fillRect(2, 2, 5, 5); b.ctx.beginPath(); b.ctx.rect(2, 2, 5, 5); b.ctx.fill()
+  for (let y = 0; y < 10; y++) for (let x = 0; x < 10; x++) assert.equal(b.at(x, y), x >= 2 && x < 7 && y >= 2 && y < 7 ? 255 : 0)
+  // Half a pixel in: half covered.
+  const h = await canvas2d(10, 4)
+  h.ctx.fillStyle = '#fff'; h.ctx.beginPath(); h.ctx.rect(2.5, 0, 4, 4); h.ctx.fill()
+  assert.ok(Math.abs(h.at(2, 1) - 128) <= 2); assert.equal(h.at(3, 1), 255); assert.ok(Math.abs(h.at(6, 1) - 128) <= 2)
+})
+
+test('canvas 2d: rotate, transform and setTransform turn paths and rects (labels laid out around a dial, a quarter turn each)', async () => {
+  const { ctx, at } = await canvas2d(40, 40)
+  ctx.fillStyle = '#fff'
+  // A bar along +x from the centre, turned a quarter: it now runs along +y.
+  ctx.save(); ctx.translate(20, 20); ctx.rotate(Math.PI / 2); ctx.fillRect(0, -2, 15, 4); ctx.restore()
+  assert.equal(at(20, 30), 255); assert.equal(at(30, 20), 0)
+  assert.deepEqual(Object.values(ctx.getTransform()).slice(0, 6), [1, 0, 0, 1, 0, 0])
+  // An eighth turn about the centre: a diagonal, so the corner-ward pixel is lit and the axis one is not.
+  const d = await canvas2d(40, 40)
+  d.ctx.fillStyle = '#fff'; d.ctx.translate(20, 20); d.ctx.rotate(Math.PI / 4); d.ctx.beginPath(); d.ctx.rect(0, -1.5, 16, 3); d.ctx.fill()
+  assert.equal(d.at(28, 28), 255); assert.equal(d.at(34, 20), 0)
+  const m = d.ctx.getTransform()
+  assert.ok(Math.abs(m.a - Math.SQRT1_2) < 1e-9 && Math.abs(m.b - Math.SQRT1_2) < 1e-9 && Math.abs(m.c + Math.SQRT1_2) < 1e-9 && m.e === 20)
+  // setTransform keeps the rotation it is given; transform multiplies onto the current matrix.
+  d.ctx.setTransform(0, 1, -1, 0, 5, 6); assert.deepEqual([d.ctx.getTransform().b, d.ctx.getTransform().c], [1, -1])
+  d.ctx.resetTransform(); d.ctx.transform(2, 0, 0, 2, 1, 1); d.ctx.transform(1, 0, 0, 1, 3, 0)
+  assert.deepEqual([d.ctx.getTransform().a, d.ctx.getTransform().e], [2, 7])
 })

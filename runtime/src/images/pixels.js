@@ -65,8 +65,22 @@ export function blendPixel(dst, di, r, g, b, a) {
   dst[di + 3] = Math.round(oa * 255)
 }
 
+// Destination-over of a straight-alpha colour (a in 0..255): the source goes under what is already there.
+export function underPixel(dst, di, r, g, b, a) {
+  if (a <= 0) return
+  const da = dst[di + 3]
+  if (da >= 255) return
+  if (da === 0) { dst[di] = r; dst[di + 1] = g; dst[di + 2] = b; dst[di + 3] = a >= 255 ? 255 : Math.round(a); return }
+  const d = da / 255, s = (a >= 255 ? 1 : a / 255) * (1 - d), oa = d + s
+  dst[di] = Math.round((dst[di] * d + r * s) / oa)
+  dst[di + 1] = Math.round((dst[di + 1] * d + g * s) / oa)
+  dst[di + 2] = Math.round((dst[di + 2] * d + b * s) / oa)
+  dst[di + 3] = Math.round(oa * 255)
+}
+
 // One pixel under a composite mode: 0 source-over, 1 copy (the source replaces the destination, so a transparent
-// source clears it), 2 destination-out (the source alpha punches the destination; its colour does not matter).
+// source clears it), 2 destination-out (the source alpha punches the destination; its colour does not matter),
+// 3 destination-over (the source is drawn behind the destination).
 export function compositePixel(dst, di, r, g, b, a, mode) {
   if (mode === 1) { dst[di] = r; dst[di + 1] = g; dst[di + 2] = b; dst[di + 3] = a >= 255 ? 255 : a <= 0 ? 0 : Math.round(a); return }
   if (mode === 2) {
@@ -74,6 +88,7 @@ export function compositePixel(dst, di, r, g, b, a, mode) {
     dst[di + 3] = a >= 255 ? 0 : Math.round(dst[di + 3] * (1 - a / 255))
     return
   }
+  if (mode === 3) { underPixel(dst, di, r, g, b, a); return }
   blendPixel(dst, di, r, g, b, a)
 }
 
