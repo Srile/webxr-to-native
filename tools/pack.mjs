@@ -142,7 +142,7 @@ writeFileSync(join(assets, 'host.json'), JSON.stringify(manifest, null, 2))
 // from the toolkit carries them. --host names the desktop or Apple host a stage is for (the builders pass it).
 const noticeHost = stageOnly ? (opt('--host') ?? 'desktop') : (phone ? 'phone' : 'quest')
 const platformSdk = !stageOnly && !phone && existsSync(join(root, 'third_party/ovr_platform_sdk/Include/OVR_Platform.h'))
-writeFileSync(join(assets, 'THIRD_PARTY_NOTICES.txt'), notices(root, noticeHost, { webrtc, svg, storage, intl, platformSdk }))
+writeFileSync(join(assets, 'THIRD_PARTY_NOTICES.txt'), notices(root, noticeHost, { webrtc, webrtcMedia: microphone, svg, storage, intl, platformSdk }))
 let bytes = 0; const walk = d => { for (const e of readdirSync(d, { withFileTypes: true })) e.isDirectory() ? walk(join(d, e.name)) : bytes += statSync(join(d, e.name)).size }; walk(assets)
 console.log(`assets: ${(bytes / 1e6).toFixed(1)} MB`)
 // 2b. OS splash: Quest shows assets/vr_splash.png (with com.oculus.ossplash in the manifest) from launch until

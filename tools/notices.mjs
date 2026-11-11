@@ -41,11 +41,12 @@ export const NOTICE_HOSTS = Object.keys(HOSTS)
 // The notices text for `host` (quest | phone | mac | win | linux | ios | vision | desktop); `webrtc` adds the WebRTC stack
 // (host.json network.webrtc), `svg` nanosvg (web.svg), `storage` SQLite (storage.*), `intl` ICU on Android (js.intl);
 // `platformSdk` notes the Meta Platform SDK loader when the game bundles it.
-export function notices(root, host, { webrtc = false, svg = false, storage = false, intl = false, platformSdk = false } = {}) {
+// `webrtcMedia` (network.webrtc with media.microphone: audio tracks) adds libsrtp.
+export function notices(root, host, { webrtc = false, webrtcMedia = false, svg = false, storage = false, intl = false, platformSdk = false } = {}) {
   const ids = HOSTS[host]
   if (!ids) throw new Error(`notices: unknown host "${host}" (${NOTICE_HOSTS.join(', ')})`)
   const list = [...ids, ...(intl && !ids.includes('icu') ? ['icu'] : []), ...(svg ? ['nanosvg'] : []),
-    ...(storage ? ['sqlite'] : []), ...(webrtc ? WEBRTC : [])]
+    ...(storage ? ['sqlite'] : []), ...(webrtc ? WEBRTC : []), ...(webrtc && webrtcMedia ? ['libsrtp'] : [])]
   const rule = '='.repeat(79)
   let out = 'THIRD-PARTY SOFTWARE NOTICES\n\n' +
     'This application runs on webxr-to-native (https://github.com/Srile/webxr-to-native, MIT licence), which\n' +

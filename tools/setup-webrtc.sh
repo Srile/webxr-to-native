@@ -42,4 +42,11 @@ if [ ! -f "$TP/mbedtls/.stamp-3.6.7" ]; then
   rm -rf "$TP/mbedtls/tests" "$TP/mbedtls/programs"
   touch "$TP/mbedtls/.stamp-3.6.7"
 fi
-log "libdatachannel 0.24.6, Mbed TLS 3.6.7"
+# Audio tracks (RTCPeerConnection.addTrack, for a game with both network.webrtc and media.microphone) are sent and
+# received over SRTP: libsrtp 2.7.0, libdatachannel's pinned major version, with its built-in AES-CM/HMAC-SHA1.
+if [ ! -f "$LDC/deps/libsrtp/.stamp-2.7.0" ]; then
+  fetch https://github.com/cisco/libsrtp/archive/refs/tags/v2.7.0.tar.gz \
+    54facb1727a557c2a76b91194dcb2d0a453aaf8e2d0cbbf1e3c2848c323e28ad "$LDC/deps/libsrtp"
+  touch "$LDC/deps/libsrtp/.stamp-2.7.0"
+fi
+log "libdatachannel 0.24.6, Mbed TLS 3.6.7, libsrtp 2.7.0"
