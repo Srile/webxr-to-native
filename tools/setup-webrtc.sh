@@ -21,7 +21,7 @@ fetch() {  # fetch <url> <sha256> <dest dir> [strip]
 }
 
 LDC="$TP/libdatachannel"
-if [ ! -f "$LDC/.stamp-v0.24.6" ]; then
+if [ ! -f "$LDC/.stamp-v0.24.6-2" ]; then
   fetch https://github.com/paullouisageneau/libdatachannel/archive/refs/tags/v0.24.6.tar.gz \
     22a66aebebd8dae561d8e5181da96f2fcc203e067c5b2186c07b39af913464c0 "$LDC"
   fetch https://github.com/paullouisageneau/libjuice/archive/b89c792e3612faf2f12cf35bcc56857313a06be3.tar.gz \
@@ -34,7 +34,10 @@ if [ ! -f "$LDC/.stamp-v0.24.6" ]; then
   # With Mbed TLS, upstream never verifies a TLS server (wss signalling could be intercepted): verify against the
   # system's CAs, which the host names in RTC_CA_PATH (host/rtc/rtc_bind.cpp).
   (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-mbedtls-verify.patch")
-  touch "$LDC/.stamp-v0.24.6"
+  # Mbed TLS writes one record (16 KiB) per call: upstream sent only the first of a larger message (a WebSocket
+  # message over 16 KiB lost its tail, and the server read the next frames as the rest of it).
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-mbedtls-partial-write.patch")
+  touch "$LDC/.stamp-v0.24.6-2"
 fi
 # libSRTP (WebRTC audio: SRTP for the media libdatachannel carries) at the commit v0.24.6 pins, its own crypto.
 if [ ! -f "$LDC/deps/libsrtp/.stamp-24b3bf8" ]; then
