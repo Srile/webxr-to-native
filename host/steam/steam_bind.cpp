@@ -169,8 +169,8 @@ void init(const v8::FunctionCallbackInfo<v8::Value>& a) {
   auto fail = [&](const std::string& why) { bind::setBool(ctx, out, "ok", false); bind::setStr(ctx, out, "error", why); HOST_LOGW("steam: %s", why.c_str()); a.GetReturnValue().Set(out); };
   if (!g_ok) {
     g_appId = (uint32_t)bind::num(a, 0);
-    // Steam sets these for a game it launches; a development install (adb) gets the configured app.
-    if (g_appId && !getenv("SteamAppId")) { const std::string s = std::to_string(g_appId); setenv("SteamAppId", s.c_str(), 1); setenv("SteamGameId", s.c_str(), 1); }
+    // Steam sets these for a game it launches (the same app); a development install (adb) gets the one asked for.
+    if (g_appId) { const std::string s = std::to_string(g_appId); setenv("SteamAppId", s.c_str(), 1); setenv("SteamGameId", s.c_str(), 1); }
     if (!g_lib && !(g_lib = dlopen("libsteam_api.so", RTLD_NOW | RTLD_LOCAL))) { const char* e = dlerror(); return fail(std::string("no libsteam_api.so: ") + (e ? e : "?")); }
     auto initFlat = sym<InitFlatFn>("SteamAPI_InitFlat");
     auto dispatchInit = sym<VoidFn>("SteamAPI_ManualDispatch_Init");
