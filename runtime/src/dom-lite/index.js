@@ -63,7 +63,7 @@ export class Node extends ev.EventTarget {
 }
 const NODE_CONST = { ELEMENT_NODE: 1, ATTRIBUTE_NODE: 2, TEXT_NODE: 3, CDATA_SECTION_NODE: 4, PROCESSING_INSTRUCTION_NODE: 7, COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_TYPE_NODE: 10, DOCUMENT_FRAGMENT_NODE: 11 }
 Object.assign(Node, NODE_CONST); Object.assign(Node.prototype, NODE_CONST)
-export class Text extends Node { constructor(data = '') { super(); this.data = String(data); this.nodeType = 3; this.nodeName = '#text' } get textContent() { return this.data } set textContent(v) { this.data = String(v) } get nodeValue() { return this.data } get length() { return this.data.length } }
+export class Text extends Node { constructor(data = '') { super(); this.data = String(data); this.nodeType = 3; this.nodeName = '#text' } get textContent() { return this.data } set textContent(v) { this.data = String(v) } get nodeValue() { return this.data } set nodeValue(v) { this.data = v == null ? '' : String(v) } get length() { return this.data.length } }
 export class Comment extends Text { constructor(d) { super(d); this.nodeType = 8; this.nodeName = '#comment' } }
 export class Element extends Node {
   constructor(tag = 'div') { super(); this.tagName = String(tag).toUpperCase(); this.nodeName = this.tagName; this.nodeType = 1; this.localName = this.tagName.toLowerCase(); this.namespaceURI = 'http://www.w3.org/1999/xhtml'
@@ -234,13 +234,14 @@ export class HTMLLinkElement extends HTMLElement {
 // What decodeAudioData decodes here (host/audio/decode.cpp; __native.audio.codecs): WAV, Ogg and WebM with Vorbis or
 // Opus (libopus), MP3 (dr_mp3). Answered as a browser answers: 'maybe' for a container that holds several codecs
 // named alone, 'probably' when every codec the type names is decoded (or the container has only one, as MP3's),
-// '' otherwise. No playback: Audio.play() rejects; games decode through Web Audio.
+// '' otherwise. No playback unless host.json audio.elements (webaudio/media-elements.js): Audio.play() rejects.
 const MEDIA_CODECS = {
   'audio/wav': ['1'], 'audio/wave': ['1'], 'audio/x-wav': ['1'],
   'audio/ogg': ['vorbis', 'opus'], 'application/ogg': ['vorbis', 'opus'], 'audio/webm': ['vorbis', 'opus'],
   'audio/mpeg': ['mp3'], 'audio/mp3': ['mp3'],
+  'audio/mp4': ['aac'], 'audio/aac': ['aac'], 'audio/x-m4a': ['aac'], 'audio/m4a': ['aac'],
 }
-const IMPLIED = new Set(['audio/mpeg', 'audio/mp3'])  // one codec only: 'probably' with no codecs parameter
+const IMPLIED = new Set(['audio/mpeg', 'audio/mp3', 'audio/aac', 'audio/x-m4a', 'audio/m4a'])  // one codec only: 'probably' with no codecs parameter
 function canPlayType(type) {
   const m = /^\s*([^\s;]+)\s*(?:;(.*))?$/.exec(String(type)); if (!m) return ''
   const mime = m[1].toLowerCase(), built = String(W.__native?.audio?.codecs ?? 'wav vorbis').split(' ')
@@ -248,7 +249,7 @@ function canPlayType(type) {
   if (!codecs.length) return ''
   const p = /(?:^|;)\s*codecs\s*=\s*(?:"([^"]*)"|([^;]*))/i.exec(m[2] ?? '')
   if (!p) return IMPLIED.has(mime) ? 'probably' : 'maybe'
-  const want = (p[1] ?? p[2]).split(',').map(c => c.trim().toLowerCase()).filter(Boolean)
+  const want = (p[1] ?? p[2]).split(',').map(c => c.trim().toLowerCase()).filter(Boolean).map(c => c.startsWith('mp4a.') ? 'aac' : c)
   return want.length && want.every(c => codecs.includes(c)) ? 'probably' : ''
 }
 export class HTMLMediaElement extends HTMLElement { constructor(t) { super(t); this.src = ''; this.currentTime = 0; this.duration = NaN; this.paused = true; this.muted = false; this.volume = 1; this.loop = false; this.autoplay = false; this.playsInline = true; this.crossOrigin = null; this.readyState = 0; this.networkState = 0; this.videoWidth = 0; this.videoHeight = 0; this.preload = 'auto' } canPlayType(t) { return canPlayType(t) } play() { const e = new DOMException('media not supported in webxr-host', 'NotSupportedError'); return Promise.reject(e) } pause() {} load() {} addTextTrack() { return null } }
@@ -435,7 +436,7 @@ export function install(g) {
   // misc globals
   g.structuredClone = (v, opts) => n.clone(v)
   g.atob = atob; g.btoa = btoa
-  g.alert = (m) => n.log(2, `alert: ${m}`); g.confirm = () => true; g.prompt = () => null; g.open = () => { n.log(2, 'window.open ignored'); return null }; g.close = () => {}; g.focus = () => {}; g.blur = () => {}; g.print = () => {}; g.stop = () => {}; g.scrollTo = () => {}; g.scroll = () => {}; g.scrollBy = () => {}; g.moveTo = () => {}; g.resizeTo = () => {}; g.postMessage = (data) => { g.setTimeout(() => g.dispatchEvent(new ev.MessageEvent('message', { data, origin: g.origin, source: g })), 0) }
+  g.alert = (m) => n.log(2, `alert: ${m}`); g.confirm = () => true; g.prompt = () => null; g.open = () => { n.log(2, 'window.open ignored'); return null }; g.close = () => { n.loop?.exit?.() }  // the app's only window: closing it quits, as a native app does; g.focus = () => {}; g.blur = () => {}; g.print = () => {}; g.stop = () => {}; g.scrollTo = () => {}; g.scroll = () => {}; g.scrollBy = () => {}; g.moveTo = () => {}; g.resizeTo = () => {}; g.postMessage = (data) => { g.setTimeout(() => g.dispatchEvent(new ev.MessageEvent('message', { data, origin: g.origin, source: g })), 0) }
   g.getComputedStyle = (el) => computedStyle(el); g.matchMedia = (q) => new MediaQueryList(String(q)); g.getSelection = () => g.document.getSelection()
   g.devicePixelRatio = 1; g.innerWidth = 1280; g.innerHeight = 800; g.outerWidth = 1280; g.outerHeight = 800; g.screenX = 0; g.screenY = 0; g.scrollX = 0; g.scrollY = 0; g.pageXOffset = 0; g.pageYOffset = 0
   // The window, from native: its size in CSS pixels, the device pixel ratio, its framebuffer in pixels and the screen's

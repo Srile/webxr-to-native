@@ -286,8 +286,12 @@ export class WebGL2RenderingContext {
   // Remembers the bound TEXTURE_2D's level-0 internalformat (what _copyFromCanvas checks a texSubImage2D against).
   _noteFormat(target, level, internalformat) {
     if (target !== GL.TEXTURE_2D || (level | 0) !== 0) return
-    const t = N.getParameter(GL.TEXTURE_BINDING_2D) | 0
-    if (t) this._lookup('texture', t)._ifmt = internalformat >>> 0
+    // The texture bound as bindTexture/activeTexture recorded it (a getParameter would wait on the GL thread at
+    // every upload: an avatar's bone texture is one each frame).
+    const known = this._tex2d?.[this._unit ?? 0]
+    const t = known !== undefined ? known : N.getParameter(GL.TEXTURE_BINDING_2D) | 0
+    const o = t ? this._lookup('texture', t) : null
+    if (o) o._ifmt = internalformat >>> 0
   }
   // ---- opaque textures (webxr projection layers): remember where they are attached, re-attach per frame ----
   // The framebuffer bound to `target` (DRAW or READ): from the recorded bindings with the GL thread on (no round
@@ -356,7 +360,15 @@ export class WebGL2RenderingContext {
     texture >>>= 0
     const u = texture - 0x84C0 /* TEXTURE0 */ + 1
     if (u > usage.units && u <= 32) usage.units = u
+    this._unit = u - 1
     N.activeTexture(texture)
+  }
+  bindTexture(target, texture) {
+    this._ensureCurrent()
+    target >>>= 0
+    const name = texture ? texture._name : 0
+    if (target === GL.TEXTURE_2D) (this._tex2d ??= [])[this._unit ?? 0] = name
+    N.bindTexture(target, name)
   }
   bindSampler(unit, sampler) {
     this._ensureCurrent()
@@ -805,6 +817,13 @@ export class WebGL2RenderingContext {
   fenceSync(condition, flags) { this._ensureCurrent(); return this._create('sync', N.fenceSync(condition, flags)) }
   isSync(sync) { this._ensureCurrent(); return !!sync && sync._name !== 0 && N.isSync(sync._name) }
   deleteSync(sync) { this._ensureCurrent(); if (!sync || sync._name === 0) return; N.deleteSync(sync._name); this._release('sync', sync) }
+  // The projection layer's colour texture (__hostOpaqueTexture) is the runtime's swapchain image: an engine that
+  // deletes it as the session ends (Babylon disposing its XR render target) leaves it to the runtime.
+  deleteTexture(texture) {
+    if (texture && texture._opaque) return
+    if (texture && this._tex2d) for (let i = 0; i < this._tex2d.length; i++) if (this._tex2d[i] === texture._name) this._tex2d[i] = 0
+    return methods.generatedMethods.deleteTexture.call(this, texture)
+  }
   clientWaitSync(sync, flags, timeout) { this._ensureCurrent(); return N.clientWaitSync(sync ? sync._name : 0, flags, timeout) }
   waitSync(sync, flags, timeout) { this._ensureCurrent(); N.waitSync(sync ? sync._name : 0, flags, timeout) }
   getSyncParameter(sync, pname) { this._ensureCurrent(); return N.getSyncParameter(sync ? sync._name : 0, pname) }

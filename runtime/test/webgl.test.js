@@ -418,6 +418,17 @@ test('an opaque texture re-attaches to the framebuffers it was attached to when 
   gl.calls.length = 0; ctx._reattachOpaque(tex); assert.equal(gl.calls.length, 0, 'nothing to do while the name holds')
 })
 
+test('deleting the opaque texture leaves the swapchain image alone', () => {
+  const { g, gl, ctx } = host()
+  const tex = g.__hostOpaqueTexture(() => 7)
+  gl.calls.length = 0
+  ctx.deleteTexture(tex)
+  assert.equal(gl.calls.filter(c => c[0] === 'deleteTexture').length, 0, 'no glDeleteTextures of the runtime\'s image')
+  assert.equal(tex._name, 7)
+  const own = ctx.createTexture(); ctx.deleteTexture(own)
+  assert.equal(gl.calls.filter(c => c[0] === 'deleteTexture').length, 1, 'the page\'s own textures still go')
+})
+
 test('call path: WebIDL-converted full-arity scalars, typed arrays by identity, a constant native holder', async () => {
   const { gl, ctx } = host({ answers: { uniformLocations: { u: 5 } } })
   const { N } = await import('../src/webgl/methods.gen.js')
