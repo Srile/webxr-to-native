@@ -1,0 +1,29 @@
+{
+  "app": {
+    "name": "hello-voice",
+    "package": "gg.dmnshd.webxrhost.hellovoice"
+  },
+  "mode": "js",
+  "web": {
+    "origin": "https://app.local",
+    "query": ""
+  },
+  "network": {
+    "allow": [],
+    "webrtc": true
+  },
+  "media": {
+    "microphone": true
+  },
+  "audio": {
+    "elements": true
+  },
+  "xr": {
+    "autoEnter": false
+  },
+  "debug": {
+    "inspector": true,
+    "port": 9235,
+    "micTone": 660
+  }
+}

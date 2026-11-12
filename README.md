@@ -7,8 +7,9 @@ Run an unmodified WebXR web game as a native app on Meta Quest and the Steam Fra
 > dashes, transforms, the whole SVG path grammar, fallback and colour-emoji fonts, a text cache), `<audio>`
 > elements, AAC decoding, a Steamworks module, and a fix for WebSocket messages over 16 KiB on TLS. On upstream's
 > WebRTC voice (whose jitter margin and FEC came from here) it adds receiver reports, so a browser peer puts FEC in
-> what it sends, browser-like renegotiation, and a libdatachannel fix for glare between two headsets. Each is listed
-> below where it belongs.
+> what it sends, browser-like renegotiation, and libdatachannel fixes for glare between two headsets and for changing
+> a live call (a data channel added to a voice call, voice added to a data channel's). Each is listed below where it
+> belongs.
 
 The game stays a web app: a three.js / IWSDK, Wonderland Engine or plain WebGL 2 build with its `index.html` and
 assets. webxr-to-native is the runtime underneath:
@@ -82,7 +83,8 @@ development and experiments; the Quest is the main target, and the Steam Frame r
       `addTransceiver`, `ontrack`): Opus over SRTP, the microphone sent, each peer's audio a track that
       `createMediaStreamSource` and `<audio srcObject>` play. Interoperates with Chrome and Quest Browser peers.
       Incoming voice is read behind a jitter margin that follows the network (60 to 240 ms), lost packets come back
-      from Opus's in-band FEC, and the log says every 5 s how each voice arrived.
+      from Opus's in-band FEC, and the log says every 5 s how each voice arrived. Voice can join a call that began
+      with data channels, and a data channel a voice call (`apps/hello-voice` checks both).
     - IndexedDB and the Cache API, on SQLite, kept across launches, in the page and in workers.
     - Service workers. A registered worker answers the page's loads as `FetchEvent`s, and controls the page from
       the start of the next launch.
@@ -387,8 +389,8 @@ host/        the native host (C++20, CMake): app/ core/ gl/ js/ xr/ audio/ img/ 
              ios/ vision/, wamr/ the WebAssembly interpreter build, tests/ native unit tests
 runtime/     the browser surface in JavaScript (runtime/src) and its tests (runtime/test)
 android/     the Gradle shell that packs the native library, the runtime and the game into an APK
-apps/        test apps (hello-xr, hello-js, hello-rtc, hello-intl, hello-mic, hello-storage, hello-sw, gl-bench)
-             and the IWSDK benchmark scenes
+apps/        test apps (hello-xr, hello-js, hello-rtc, hello-voice, hello-intl, hello-mic, hello-storage, hello-sw,
+             gl-bench) and the IWSDK benchmark scenes
 tools/       setup scripts, the builders (pack, mac, win, linux, ios), device, bridge, profile, test, bench
 licenses/    the licence texts of the third-party software the apps contain
 third_party/ downloaded by the setup scripts (gitignored)
