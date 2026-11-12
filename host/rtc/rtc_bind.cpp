@@ -370,7 +370,9 @@ void audioAdd(const v8::FunctionCallbackInfo<v8::Value>& a) {
     { static std::mt19937 rng{std::random_device{}()}; do x->ssrc = (uint32_t)rng(); while (x->ssrc == 0); }
     const std::string stream = "webxr-host-" + std::to_string(pcId), trackId = "audio-" + mid;
     rtc::Description::Audio media(mid, rtc::Description::Direction::SendRecv);
-    media.addOpusCodec(pt);
+    // Voice, as browsers offer it: mono, FEC. libdatachannel's default profile (maxaveragebitrate=96000, stereo=1) had
+    // a browser peer send 96 kb/s of stereo to a host that decodes mono, three times its voice default.
+    media.addOpusCodec(pt, std::string("minptime=10;useinbandfec=1"));
     media.addSSRC(x->ssrc, std::string("webxr-host"), stream, trackId);
     x->track = p->addTrack(media);
     auto cfg = std::make_shared<rtc::RtpPacketizationConfig>(x->ssrc, "webxr-host", (uint8_t)pt, rtc::OpusRtpPacketizer::DefaultClockRate);
