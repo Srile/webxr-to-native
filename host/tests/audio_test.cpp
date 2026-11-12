@@ -7,8 +7,10 @@
 #include "audio/webm.h"
 #ifdef HOST_HAS_OPUS
 #include <opus.h>
+#include "audio/voice_in.h"
 #endif
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -621,8 +623,169 @@ static void testCapture() {
   tr->unref();
 }
 
+// A network voice's jitter margin (JitterTarget) and its adaptive ring, against arrival patterns of a Wi-Fi link.
+struct VoiceSim { uint32_t underruns = 0, jumps = 0; double lagMax = 0, lagEnd = 0; };
+// 20 ms Opus-sized packets of a speech-like signal (300 ms of 440 Hz, 200 ms silent; phase-continuous, so any
+// skipped or missing sample mid-tone shows as a jump), delivered in order 5-15 ms late, and every `every` packets a
+// stall of stall(i) seconds for the i-th (what follows queues behind it). The reader renders 128-sample quanta.
+template <class Stall>
+static VoiceSim simulateVoice(bool adaptive, Stall stall, int every, double seconds, double measureFrom) {
+  const double R = 48000; const int N = 128, F = 960;
+  CaptureRing ring(0.06, 0.25, adaptive); ring.setRate(R);
+  JitterTarget jitter;
+  auto signal = [&](uint64_t i) { return (i % 24000) < 14400 ? 0.3f * (float)std::sin(2 * PI * 440 * (double)i / R) : 0.0f; };
+  uint32_t lcg = 12345; auto noise = [&] { lcg = lcg * 1664525u + 1013904223u; return (double)(lcg >> 8) / (1 << 24); };
+  std::vector<double> arrival; double prev = 0;
+  for (int k = 0; (k + 1) * 0.02 < seconds + 1; k++) {
+    const double a = (k + 1) * 0.02 + 0.005 + 0.01 * noise() + (k % every == every - 1 ? stall(k / every, (k + 1) * 0.02) : 0);
+    prev = std::max(prev, a); arrival.push_back(prev);
+  }
+  VoiceSim r; LiveCursor c; float out[N], pkt[F]; size_t next = 0; float last = 0; bool lastValid = false;
+  for (double t = 0; t < seconds; t += N / R) {
+    while (next < arrival.size() && arrival[next] <= t) {
+      for (int i = 0; i < F; i++) pkt[i] = signal(next * F + i);
+      ring.write(pkt, F);
+      const double target = jitter.arrived(arrival[next], (uint32_t)(next * F), R, ring.underruns());
+      if (adaptive) ring.setTargetLag(target);
+      next++;
+    }
+    const uint32_t u0 = ring.underruns();
+    const bool got = ring.read(c, out, N, R);
+    if (t < measureFrom) { lastValid = false; continue; }
+    if (ring.underruns() != u0) r.underruns++;
+    r.lagEnd = (double)(ring.written() - c.pos) / R;
+    r.lagMax = std::max(r.lagMax, r.lagEnd);
+    for (int i = 0; i < N; i++) {
+      const float x = got ? out[i] : 0.0f;
+      if (lastValid && std::fabs(x - last) > 0.3f * 2 * PI * 440 / R * 1.2) r.jumps++;
+      last = x; lastValid = true;
+    }
+  }
+  return r;
+}
+
+static void testJitter() {
+  const double R = 48000;
+  { // Steady arrivals: the margin stays at the fixed one it replaces (60 ms).
+    JitterTarget j; double t = 1;
+    for (int k = 0; k < 500; k++) j.arrived(t + k * 0.02 + 0.002 * (k % 3), (uint32_t)(k * 960), R, 0);
+    CHECK(std::fabs(j.target() - 0.06) < 0.001, "steady arrivals: margin %.1f ms", j.target() * 1000);
+  }
+  { // A 100 ms stall every 2 s: the margin covers it (stall + 20 ms), and decays once the stalls stop.
+    JitterTarget j; double t = 1, behind = 0; uint32_t ts = 0;
+    for (int k = 0; k < 500; k++, ts += 960) { double a = t + k * 0.02 + (k % 100 == 99 ? 0.1 : 0); behind = std::max(behind, a); j.arrived(behind, ts, R, 0); }
+    CHECK(j.target() > 0.11 && j.target() < 0.13, "100 ms stalls: margin %.1f ms", j.target() * 1000);
+    for (int k = 500; k < 2500; k++, ts += 960) j.arrived(t + k * 0.02, ts, R, 0);
+    CHECK(j.target() < 0.07, "40 s steady after: margin back to %.1f ms", j.target() * 1000);
+    // A sender's 3 s silence (timestamps jump with it): no jitter seen.
+    const double resume = t + 2500 * 0.02 + 3;
+    j.arrived(resume, ts + 3 * 48000, R, 0); j.arrived(resume + 0.02, ts + 3 * 48000 + 960, R, 0);
+    CHECK(j.target() < 0.07, "a paused sender: margin %.1f ms", j.target() * 1000);
+    // An underrun the readers saw raises it by 20 ms at once.
+    const double was = j.target(); j.arrived(resume + 0.04, ts + 3 * 48000 + 1920, R, 1);
+    CHECK(j.target() >= was + 0.019, "an underrun: margin %.1f -> %.1f ms", was * 1000, j.target() * 1000);
+    for (int k = 0; k < 50; k++) j.arrived(resume + 0.06 + k * 0.02 + (k == 25 ? 0.5 : 0), ts + 3 * 48000 + (uint32_t)(3 + k) * 960, R, 1);
+    CHECK(j.target() <= 0.24 + 1e-9, "capped: %.1f ms", j.target() * 1000);
+  }
+  // A steady link: the adaptive ring plays like the fixed one (nothing held back or skipped mid-tone).
+  const auto none = [](int, double) { return 0.0; };
+  VoiceSim steady = simulateVoice(true, none, 1000000, 20, 2);
+  CHECK(steady.underruns == 0 && steady.jumps == 0, "steady link: %u underruns, %u jumps", steady.underruns, steady.jumps);
+  // A link getting worse (a stall each second, 15 ms longer each time, from 60 ms): the fixed margin drops out at
+  // every new longest stall (it only grows by re-priming after one); the adaptive margin is the last stall + 20 ms.
+  const auto worse = [](int i, double) { return std::min(0.06 + 0.015 * i, 0.2); };
+  VoiceSim fixedW = simulateVoice(false, worse, 50, 14, 1), adaptW = simulateVoice(true, worse, 50, 14, 1);
+  printf("worsening stalls: fixed margin %u underruns, %u jumps; adaptive %u underruns, %u jumps, lag up to %.0f ms\n",
+         fixedW.underruns, fixedW.jumps, adaptW.underruns, adaptW.jumps, adaptW.lagMax * 1000);
+  CHECK(fixedW.underruns >= 4, "fixed margin, worsening stalls: %u underruns", fixedW.underruns);
+  CHECK(adaptW.underruns <= 1 && adaptW.jumps <= fixedW.jumps / 4, "adaptive margin, worsening stalls: %u underruns, %u jumps", adaptW.underruns, adaptW.jumps);
+  // A 100 ms stall every 500 ms (a weak Wi-Fi link): once learnt, the adaptive margin plays through, lag bounded.
+  const auto stall100 = [](int, double) { return 0.1; };
+  VoiceSim adapt = simulateVoice(true, stall100, 25, 40, 10);
+  CHECK(adapt.underruns == 0 && adapt.jumps == 0 && adapt.lagMax < 0.3, "adaptive, 100 ms stalls: %u underruns, %u jumps, lag up to %.0f ms", adapt.underruns, adapt.jumps, adapt.lagMax * 1000);
+  // 150 ms stalls stop at 20 s: the adaptive lag comes back down in the silent stretches (to its margin, within
+  // kSlack), without a jump; the fixed margin keeps the lag its last stall left it.
+  const auto until20 = [](int, double at) { return at < 20 ? 0.15 : 0.0; };
+  VoiceSim fixedC = simulateVoice(false, until20, 25, 80, 10), calm = simulateVoice(true, until20, 25, 80, 10);
+  printf("stalls stop at 20 s: lag at 80 s fixed %.0f ms, adaptive %.0f ms (%u underruns, %u jumps)\n", fixedC.lagEnd * 1000, calm.lagEnd * 1000, calm.underruns, calm.jumps);
+  CHECK(calm.underruns == 0 && calm.jumps == 0 && calm.lagEnd < 0.11 && calm.lagEnd + 0.05 < fixedC.lagEnd,
+        "after the stalls: adaptive lag %.0f ms (fixed %.0f), %u underruns, %u jumps", calm.lagEnd * 1000, fixedC.lagEnd * 1000, calm.underruns, calm.jumps);
+}
+
+#ifdef HOST_HAS_OPUS
+// OpusVoiceIn: a lost packet comes back from the next one's in-band FEC; longer gaps are concealed; late ones dropped.
+struct PcmSink { std::vector<float> pcm; void write(const float* x, uint32_t n) { pcm.insert(pcm.end(), x, x + n); } };
+static void testVoiceIn() {
+  int e = 0; OpusEncoder* enc = opus_encoder_create(48000, 1, OPUS_APPLICATION_VOIP, &e);
+  opus_encoder_ctl(enc, OPUS_SET_BITRATE(32000)); opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1)); opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(20));
+  opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+  // A voice-like signal: a 180 Hz fundamental with harmonics, its pitch and level moving.
+  std::vector<std::vector<unsigned char>> packets; float frame[960]; unsigned char buf[1500];
+  for (int k = 0; k < 100; k++) {
+    for (int i = 0; i < 960; i++) {
+      const double t = (k * 960 + i) / 48000.0, f = 180 + 40 * std::sin(2 * PI * 0.7 * t);
+      double x = 0; for (int h = 1; h <= 6; h++) x += std::sin(2 * PI * f * h * t + h) / h;
+      frame[i] = (float)(0.15 * x * (0.6 + 0.4 * std::sin(2 * PI * 1.3 * t)));
+    }
+    const int len = opus_encode_float(enc, frame, 960, buf, sizeof buf);
+    packets.emplace_back(buf, buf + std::max(len, 0));
+  }
+  opus_encoder_destroy(enc);
+  auto run = [&](auto drop, bool fec) {
+    OpusDecoder* dec = opus_decoder_create(48000, 1, &e); PcmSink sink; OpusVoiceIn in(dec);
+    float pcm[960];
+    for (int k = 0; k < (int)packets.size(); k++) {
+      if (drop(k)) continue;
+      if (fec) in.packet((uint16_t)(60000 + k), packets[k].data(), (int)packets[k].size(), sink);  // wraps past 65535
+      else {  // the old way: every missing frame concealed
+        while ((int)sink.pcm.size() < k * 960) { opus_decode_float(dec, nullptr, 0, pcm, 960, 0); sink.write(pcm, 960); }
+        const int n = opus_decode_float(dec, packets[k].data(), (int)packets[k].size(), pcm, 960, 0); sink.write(pcm, n);
+      }
+    }
+    opus_decoder_destroy(dec);
+    return std::make_pair(sink.pcm, std::array<uint32_t, 3>{in.recovered, in.concealed, in.late});
+  };
+  const auto all = run([](int) { return false; }, true).first;
+  CHECK(all.size() == 100 * 960, "every packet decoded: %zu samples", all.size());
+  const auto every7 = [](int k) { return k % 7 == 3; };
+  const auto [withFec, counts] = run(every7, true);
+  const auto plcOnly = run(every7, false).first;
+  CHECK(withFec.size() == all.size() && plcOnly.size() == all.size(), "losses filled to length: %zu, %zu", withFec.size(), plcOnly.size());
+  CHECK(counts[0] == 14 && counts[1] == 0 && counts[2] == 0, "single losses recovered: %u recovered, %u concealed, %u late", counts[0], counts[1], counts[2]);
+  double errFec = 0, errPlc = 0, ref = 0;
+  for (int k = 3; k < 100; k += 7) for (int i = k * 960; i < (k + 1) * 960; i++) {
+    errFec += (withFec[i] - all[i]) * (withFec[i] - all[i]); errPlc += (plcOnly[i] - all[i]) * (plcOnly[i] - all[i]); ref += all[i] * all[i];
+  }
+  printf("lost frames: FEC error %.1f dB, concealment error %.1f dB (below the signal)\n", db(std::sqrt(errFec / ref)), db(std::sqrt(errPlc / ref)));
+  CHECK(errFec < errPlc * 0.5, "FEC closer than concealment: %.4f vs %.4f", errFec / ref, errPlc / ref);
+  // A gap of three: the last from FEC, two concealed. A late packet: dropped.
+  const auto [gap3, c3] = run([](int k) { return k >= 10 && k < 13; }, true);
+  CHECK(c3[0] == 1 && c3[1] == 2 && gap3.size() == all.size(), "a gap of three: %u recovered, %u concealed", c3[0], c3[1]);
+  OpusDecoder* dec = opus_decoder_create(48000, 1, &e); PcmSink sink; OpusVoiceIn in(dec);
+  in.packet(5, packets[0].data(), (int)packets[0].size(), sink); in.packet(6, packets[1].data(), (int)packets[1].size(), sink);
+  CHECK(!in.packet(5, packets[0].data(), (int)packets[0].size(), sink) && in.late == 1 && sink.pcm.size() == 2 * 960, "a late packet dropped");
+  opus_decoder_destroy(dec);
+  // By RTP timestamp (packetAt, what the rtc binding has): the same recovery, a late frame dropped, and a sender's
+  // silent stretch (a gap of a second or more) not filled.
+  {
+    OpusDecoder* d2 = opus_decoder_create(48000, 1, &e); PcmSink s2; OpusVoiceIn in2(d2);
+    const uint32_t t0 = 0xFFFFF000u;  // wraps past 2^32
+    for (int k = 0; k < 100; k++) if (!every7(k)) in2.packetAt(t0 + (uint32_t)k * 960, packets[k].data(), (int)packets[k].size(), s2);
+    CHECK(s2.pcm.size() == all.size() && in2.recovered == 14 && in2.concealed == 0, "by timestamp: %zu samples, %u recovered, %u concealed", s2.pcm.size(), in2.recovered, in2.concealed);
+    CHECK(!in2.packetAt(t0 + 50 * 960, packets[50].data(), (int)packets[50].size(), s2) && in2.late == 1, "by timestamp: a late frame dropped");
+    const size_t before = s2.pcm.size(); const uint32_t was = in2.recovered + in2.concealed;
+    in2.packetAt(t0 + 100 * 960 + 3 * 48000, packets[0].data(), (int)packets[0].size(), s2);
+    CHECK(s2.pcm.size() == before + 960 && in2.recovered + in2.concealed == was, "by timestamp: a silent stretch is not filled");
+    opus_decoder_destroy(d2);
+  }
+}
+#endif
+
 int main() {
-  testLowpass(); testAutomation(); testBufferSource(); testPanner(); testCompressor(); testOscillator(); testLifetime(); testDecode(); testWebm(); testAnalyser(); testCapture();
+  testLowpass(); testAutomation(); testBufferSource(); testPanner(); testCompressor(); testOscillator(); testLifetime(); testDecode(); testWebm(); testAnalyser(); testCapture(); testJitter();
+#ifdef HOST_HAS_OPUS
+  testVoiceIn();
+#endif
   if (failures) { fprintf(stderr, "audio_test: %d failure(s)\n", failures); return 1; }
   puts("audio_test ok"); return 0;
 }

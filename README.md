@@ -62,7 +62,9 @@ development and experiments; the Quest is the main target.
   - Opt-in per game:
     - WebSocket and WebRTC data channels; with `media.microphone` too, WebRTC audio tracks (`addTrack`,
       `addTransceiver`, `ontrack`): Opus over SRTP, the microphone sent, each peer's audio a track that
-      `createMediaStreamSource` plays. Interoperates with Chrome and Quest Browser peers.
+      `createMediaStreamSource` plays. Interoperates with Chrome and Quest Browser peers. Incoming voice is read behind a
+      jitter margin that follows the network (60 to 240 ms), lost packets come back from Opus's in-band FEC, and
+      the log says every 5 s how each voice arrived.
     - IndexedDB and the Cache API, on SQLite, kept across launches, in the page and in workers.
     - Service workers. A registered worker answers the page's loads as `FetchEvent`s, and controls the page from
       the start of the next launch.

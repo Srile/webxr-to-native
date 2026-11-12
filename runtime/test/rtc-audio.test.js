@@ -19,6 +19,7 @@ function sandbox({ media = true } = {}) {
     audioSource: (x, nid) => calls.push(['audioSource', x, nid]),
     audioBitrate: (x, bps) => calls.push(['audioBitrate', x, bps]),
     audioClose: (x) => calls.push(['audioClose', x]),
+    audioRemoteEnabled: (nid, on) => calls.push(['audioRemoteEnabled', nid, on]),
   })
   const g = Object.create(null); g.__native = fakeNative({ rtc: base }); g.Promise = Promise
   installCore(g); installFetch(g)

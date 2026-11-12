@@ -115,9 +115,10 @@ export function install(g) {
       this._enabled = true; this._state = info.id || this._remote ? 'live' : 'ended'; this._streams = new Set()
       if (this._nid && !this._remote) { byId.set(this._nid, this); if (this._state === 'live') live.add(this) }
     }
-    _setNative(nid) { this._nid = nid }
+    _setNative(nid) { this._nid = nid; if (!this._enabled) this._remoteEnabled() }
+    _remoteEnabled() { if (this._nid) g.__native.rtc?.audioRemoteEnabled?.(this._nid, this._enabled) }
     get enabled() { return this._enabled }
-    set enabled(v) { this._enabled = !!v; if (this._nid && !this._remote && this._state === 'live') N.setEnabled(this._nid, this._enabled) }
+    set enabled(v) { this._enabled = !!v; if (this._remote) this._remoteEnabled(); else if (this._nid && this._state === 'live') N.setEnabled(this._nid, this._enabled) }
     get muted() { return false }
     get readyState() { return this._state }
     stop() { this._end(false) }

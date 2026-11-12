@@ -211,3 +211,13 @@ test('AnalyserNode: defaults, validation, the page\'s arrays handed to native', 
   assert.throws(() => new g.AnalyserNode(ctx, { minDecibels: -10, maxDecibels: -20 }), (e) => e.name === 'IndexSizeError')
   assert.ok(new g.OfflineAudioContext(1, 128, 48000).createAnalyser() instanceof g.AnalyserNode)
 })
+
+test("a remote track's enabled reaches the rtc binding (a muted player), also when set before the track has its native id", () => {
+  const { g, m } = sandbox()
+  const calls = []; g.__native.rtc = { audioRemoteEnabled: (nid, on) => calls.push([nid, on]) }
+  const t = g.__hostMedia.remoteTrack(); assert.equal(t.readyState, 'live')
+  t.enabled = false; assert.deepEqual(calls, [], 'no native track yet')
+  t._setNative(0x40000001); assert.deepEqual(calls, [[0x40000001, false]])
+  t.enabled = true; assert.deepEqual(calls.at(-1), [0x40000001, true])
+  assert.equal(m.calls?.some?.((c) => c[0] === 'setEnabled') ?? false, false, 'the microphone is not touched')
+})
