@@ -246,7 +246,7 @@ export function install(g) {
     // negotiationneeded once the connection is stable, after the task that changed what it carries. An addition (a
     // track, a transceiver, the first data channel) asks only if the description in place lacks it, as a browser checks
     // before firing: an answer made after the page added its track already carries it, and a needless offer collides
-    // with the peer's next one. A removal or a direction change always asks.
+    // with the peer's next one. A removal (removeTrack) always asks.
     _needNegotiation(always = true) {
       this._negotiateAlways = this._negotiateAlways || always
       if (this._negotiation || this._closed) return
