@@ -21,7 +21,7 @@ fetch() {  # fetch <url> <sha256> <dest dir> [strip]
 }
 
 LDC="$TP/libdatachannel"
-if [ ! -f "$LDC/.stamp-v0.24.6-2" ]; then
+if [ ! -f "$LDC/.stamp-v0.24.6-3" ]; then
   fetch https://github.com/paullouisageneau/libdatachannel/archive/refs/tags/v0.24.6.tar.gz \
     22a66aebebd8dae561d8e5181da96f2fcc203e067c5b2186c07b39af913464c0 "$LDC"
   fetch https://github.com/paullouisageneau/libjuice/archive/b89c792e3612faf2f12cf35bcc56857313a06be3.tar.gz \
@@ -37,7 +37,10 @@ if [ ! -f "$LDC/.stamp-v0.24.6-2" ]; then
   # Mbed TLS writes one record (16 KiB) per call: upstream sent only the first of a larger message (a WebSocket
   # message over 16 KiB lost its tail, and the server read the next frames as the rest of it).
   (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-mbedtls-partial-write.patch")
-  touch "$LDC/.stamp-v0.24.6-2"
+  # A track added with the mid of one that is gone (an audio m-line rolled back, then taken again by the peer's offer:
+  # glare between two hosts, whose mids are the same) was never found by its mid, and the answer rejected it.
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-track-mid-reuse.patch")
+  touch "$LDC/.stamp-v0.24.6-3"
 fi
 if [ ! -f "$TP/mbedtls/.stamp-3.6.7" ]; then
   fetch https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2 \
