@@ -207,8 +207,15 @@ void stats(const Args& a) {
   bind::setStr(ctx, o, "preset", m.live() ? m.preset() : "");
   a.GetReturnValue().Set(o);
 }
-audio::LiveInput* trackInput(uint32_t id) { return Mic::get().input(id); }
+audio::LiveInput* (*g_rtcInputs)(uint32_t) = nullptr;  // remote WebRTC tracks (setRtcLiveInputs)
+audio::LiveInput* trackInput(uint32_t id) {
+  if (id >= kRemoteTrackBase) return g_rtcInputs ? g_rtcInputs(id) : nullptr;
+  return Mic::get().input(id);
+}
 }  // namespace
+
+void setRtcLiveInputs(audio::LiveInput* (*resolve)(uint32_t)) { g_rtcInputs = resolve; }
+audio::LiveInput* captureInput(uint32_t id) { return id && id < kRemoteTrackBase ? Mic::get().input(id) : nullptr; }
 
 void installMedia(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc) {
   g_svc = &svc;

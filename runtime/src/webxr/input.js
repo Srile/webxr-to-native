@@ -12,6 +12,12 @@ const SELECT_OFF = 0.6
 const BUTTONS = 10  // HOST_INPUT_BUTTONS
 
 function pose7(out, rec, at) { for (let i = 0; i < 7; i++) out[i] = rec[at + i] }
+// A Touch controller's targetRaySpace as Quest Browser gives it: OpenXR's aim pose turned half a turn about its own
+// forward (-Z) axis, so that its +X points where the grip's +X does (IWER's Touch profiles, recorded from Quest
+// Browser, put the two within 7 degrees). The ray's direction is the same either way; its roll is what differs,
+// and games that read the ray's axes (a palm's facing, a held tool's up) are upside down without this.
+// q' = q * (0, 0, 1, 0): (x, y, z, w) -> (y, -x, w, -z).
+function rollAim(out) { const x = out[3], y = out[4], z = out[5], w = out[6]; out[3] = y; out[4] = -x; out[5] = w; out[6] = -z }
 
 export class InputBridge {
   constructor(hostInput) {
@@ -47,7 +53,7 @@ export class InputBridge {
       st.mode = XRHostInputMode.Controller
       pose7(st.grip, rec, b + I.GRIP_POS)
       st.gripValid = rec[b + I.GRIP_VALID] > 0.5
-      pose7(st.targetRay, rec, b + I.AIM_POS)
+      pose7(st.targetRay, rec, b + I.AIM_POS); rollAim(st.targetRay)
       st.targetRayValid = rec[b + I.AIM_VALID] > 0.5
       st.palmValid = false
       const values = st.buttonValues, pressed = st.buttonPressed, touched = st.buttonTouched

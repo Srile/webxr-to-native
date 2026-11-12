@@ -50,6 +50,13 @@ void installMedia(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Host
 namespace audio { struct LiveInput; }
 // The audio binding's source of capture tracks (id -> a LiveInput with one reference for the caller, or null).
 void setAudioLiveInputs(audio::LiveInput* (*resolve)(uint32_t trackId));
+// Remote audio tracks (rtc/rtc_bind.cpp in a build with WebRTC media: network.webrtc and media.microphone) take
+// track ids from kRemoteTrackBase up; the media binding's resolver passes those to the rtc binding's.
+constexpr uint32_t kRemoteTrackBase = 0x40000000u;
+void setRtcLiveInputs(audio::LiveInput* (*resolve)(uint32_t trackId));
+// A capture track's input, with one reference for the caller (null if unknown or ended), for what the rtc binding
+// sends. Host thread only. media/media_bind.cpp, so only in a build with the microphone.
+audio::LiveInput* captureInput(uint32_t trackId);
 // __native.storage: IndexedDB + Cache API over SQLite (storage/storage_bind.cpp, WP-26), only in a build with
 // HOST_STORAGE (host.json storage.indexedDB / storage.cache). Installed on the page's __native and on every worker's.
 void installStorage(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);

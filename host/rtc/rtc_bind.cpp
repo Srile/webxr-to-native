@@ -15,6 +15,15 @@
 #include "js/v8compat.h"
 #include "net/http.h"
 #include <rtc/rtc.hpp>
+#ifdef HOST_HAS_WEBRTC_MEDIA
+#include <opus.h>
+#include <algorithm>
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include "audio/graph.h"
+#include "audio/live_ring.h"
+#endif
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -30,6 +39,7 @@ std::atomic<int> g_nextId{1};
 std::unordered_map<int, std::shared_ptr<rtc::WebSocket>> g_ws;
 std::unordered_map<int, std::shared_ptr<rtc::PeerConnection>> g_pc;
 std::unordered_map<int, std::shared_ptr<rtc::DataChannel>> g_dc;
+void closeXcvsOf(int pcId);  // its audio tracks end with the connection
 
 // One event to JS, on the loop thread. Arguments are plain values, made into V8 values there.
 struct Arg { enum { Num, Str, Bin } kind = Num; double n = 0; std::string s; };
@@ -164,6 +174,9 @@ void pcCreate(const v8::FunctionCallbackInfo<v8::Value>& a) {
     pc->onIceStateChange([id](rtc::PeerConnection::IceState s) { emit("pc-ice", id, {str(kIce[(int)s])}); });
     pc->onGatheringStateChange([id](rtc::PeerConnection::GatheringState s) { emit("pc-gathering", id, {str(kGathering[(int)s])}); });
     pc->onSignalingStateChange([id](rtc::PeerConnection::SignalingState s) { emit("pc-signaling", id, {str(kSignaling[(int)s])}); });
+    // Every audio m-line has its track made by the page before its description is applied (audioAdd); one made
+    // by the remote side alone would carry nothing here.
+    pc->onTrack([id](std::shared_ptr<rtc::Track> t) { HOST_LOGW("rtc: #%d remote m-line %s has no local transceiver; its media is ignored", id, t->mid().c_str()); });
     pc->onDataChannel([id](std::shared_ptr<rtc::DataChannel> d) {
       const int did = g_nextId++; watch(did, d);  // callbacks first: nothing the peer sends is missed
       g_svc->loop->post([did, d] { g_dc[did] = d; });
@@ -198,6 +211,9 @@ void describe(const v8::FunctionCallbackInfo<v8::Value>& a, const std::optional<
   a.GetReturnValue().Set(out);
 }
 void pcLocal(const v8::FunctionCallbackInfo<v8::Value>& a) { PC_OR_THROW describe(a, p->localDescription()); }
+// The signalling state now, as a browser's changes within setLocalDescription/setRemoteDescription (the
+// pc-signaling event arrives a loop turn later; a page deciding offer or answer must not wait for it).
+void pcSignaling(const v8::FunctionCallbackInfo<v8::Value>& a) { PC_OR_THROW a.GetReturnValue().Set(bind::str(a.GetIsolate(), kSignaling[(int)p->signalingState()])); }
 void pcRemote(const v8::FunctionCallbackInfo<v8::Value>& a) { PC_OR_THROW describe(a, p->remoteDescription()); }
 // pcCreateDataChannel(pc, label, ordered, maxRetransmits, maxPacketLifeTime, negotiated, id, protocol) -> dcId
 void pcCreateDataChannel(const v8::FunctionCallbackInfo<v8::Value>& a) {
@@ -216,8 +232,186 @@ void pcCreateDataChannel(const v8::FunctionCallbackInfo<v8::Value>& a) {
 void pcClose(const v8::FunctionCallbackInfo<v8::Value>& a) {
   auto it = g_pc.find(bind::i32(a, 0)); if (it == g_pc.end()) return;
   auto keep = it->second; g_pc.erase(it);
+  closeXcvsOf(bind::i32(a, 0));
   guarded(a, [&] { keep->close(); });
 }
+#ifdef HOST_HAS_WEBRTC_MEDIA
+// ---- audio tracks ----
+// One audio m-line (an RTCRtpTransceiver's native side): an Opus track that sends what its source capture track
+// (the microphone) hears and plays what the peer sends through a remote track, a LiveInput that
+// MediaStreamAudioSourceNode reads like a microphone's (id kRemoteTrackBase + n).
+//   audioAdd(pc, mid, payloadType) -> [xid, remoteTrackId]   before the offer that carries it, or before the remote
+//                                     offer whose m-line it answers (same mid): sendrecv, Opus only
+//   audioSource(xid, captureTrackId)  what it sends (0: nothing)
+//   audioBitrate(xid, bps)            the encoder's target (RTCRtpSender.setParameters maxBitrate)
+//   audioStats(xid) -> [packetsIn, framesOut, open]
+//   audioClose(xid)                   the remote track ends; nothing more is sent
+// Sending runs on one thread of its own, every 20 ms: 960 samples from each source's ring, one Opus frame each.
+// Receiving decodes on libdatachannel's thread into the remote track's ring (packet loss concealed by Opus).
+class RemoteAudio : public audio::LiveInput {
+ public:
+  RemoteAudio() { int e = 0; dec_ = opus_decoder_create(48000, 1, &e); ring_.setRate(48000); }
+  ~RemoteAudio() override { if (dec_) opus_decoder_destroy(dec_); }
+  std::atomic<bool> ended{false};
+  std::atomic<uint64_t> packets{0};
+  bool read(audio::LiveCursor& c, float* out, int n, double rate) override {
+    if (ended.load(std::memory_order_relaxed)) { c.primed = c.waiting = false; return false; }
+    return ring_.read(c, out, n, rate);
+  }
+  bool live() const override { return !ended.load(std::memory_order_relaxed); }
+  // One Opus packet (an RTP payload), on libdatachannel's thread. Late or repeated packets are dropped; a gap of
+  // a few frames is filled by the decoder's concealment, so the ring keeps time with the sender.
+  void packet(const std::byte* data, size_t size, uint32_t ts) {
+    if (!dec_ || ended.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (have_) {
+      const int32_t ahead = (int32_t)(ts - last_);
+      if (ahead <= 0) return;
+      if (dur_ > 0 && ahead > dur_ && ahead < 48000) {
+        for (int lost = std::min(ahead / dur_ - 1, 5); lost > 0; --lost) {
+          const int k = opus_decode_float(dec_, nullptr, 0, pcm_, dur_, 0); if (k > 0) ring_.write(pcm_, (uint32_t)k);
+        }
+      }
+    }
+    const int k = opus_decode_float(dec_, (const unsigned char*)data, (opus_int32)size, pcm_, kMax, 0);
+    if (k > 0) { ring_.write(pcm_, (uint32_t)k); dur_ = k; }
+    last_ = ts; have_ = true; packets.fetch_add(1, std::memory_order_relaxed);
+  }
+ private:
+  static constexpr int kMax = 5760;  // 120 ms at 48 kHz, Opus's longest frame
+  OpusDecoder* dec_ = nullptr; audio::CaptureRing ring_; std::mutex mu_;
+  float pcm_[kMax]; uint32_t last_ = 0; int dur_ = 960; bool have_ = false;
+};
+struct AudioXcv {
+  int pc = 0; uint32_t ssrc = 0;
+  std::shared_ptr<rtc::Track> track;
+  RemoteAudio* remote = nullptr; uint32_t remoteId = 0;  // one reference, released on the host thread
+  // Sending, under g_sendMu (the sender thread reads them):
+  audio::LiveInput* input = nullptr; audio::LiveCursor cursor; OpusEncoder* enc = nullptr;
+  int bitrate = 32000, applied = 0; uint32_t ts = 0; uint64_t sent = 0; bool closed = false;
+};
+std::unordered_map<int, std::shared_ptr<AudioXcv>> g_xcv;                  // host thread
+std::unordered_map<uint32_t, RemoteAudio*> g_remote;                       // host thread: remote track id -> input
+uint32_t g_nextRemote = kRemoteTrackBase + 1;
+std::mutex g_sendMu; std::vector<std::shared_ptr<AudioXcv>> g_sending;   // the sender thread's list
+std::atomic<bool> g_senderRun{false};
+
+void retire(audio::LiveInput* in) {  // the last reference of a capture input goes on the host thread
+  if (!in) return;
+  g_svc->loop->post([in] { in->unref(); });
+}
+void senderLoop() {
+  float pcm[960]; unsigned char pkt[1500];
+  auto next = std::chrono::steady_clock::now();
+  while (g_senderRun.load(std::memory_order_relaxed)) {
+    next += std::chrono::milliseconds(20);
+    {
+      std::lock_guard<std::mutex> lk(g_sendMu);
+      for (auto& x : g_sending) {
+        if (x->closed || !x->track || !x->enc) continue;
+        if (x->applied != x->bitrate) { opus_encoder_ctl(x->enc, OPUS_SET_BITRATE(x->bitrate)); x->applied = x->bitrate; }
+        const bool have = x->input && x->input->read(x->cursor, pcm, 960, 48000.0);
+        if (!have) memset(pcm, 0, sizeof pcm);  // muted or no source: silence keeps the stream's clock going
+        const int n = opus_encode_float(x->enc, pcm, 960, pkt, sizeof pkt);
+        const uint32_t ts = x->ts; x->ts += 960;
+        if (n <= 0 || !x->input) continue;  // nothing to send without a source (the peer hears nothing, as in a browser)
+        try { if (x->track->isOpen()) { x->track->sendFrame((const std::byte*)pkt, (size_t)n, rtc::FrameInfo(ts)); x->sent++; } }
+        catch (const std::exception& e) { HOST_LOGW("rtc: audio send failed: %s", e.what()); }
+      }
+    }
+    std::this_thread::sleep_until(next);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - next > std::chrono::milliseconds(200)) next = now;  // a long stall: no burst of catch-up frames
+  }
+}
+void ensureSender() {
+  if (g_senderRun.exchange(true)) return;
+  std::thread(senderLoop).detach();  // lives as long as the process (a sleeping 20 ms tick when nothing is sent)
+}
+audio::LiveInput* remoteInput(uint32_t id) {  // the media binding's resolver for remote ids, host thread
+  auto it = g_remote.find(id); if (it == g_remote.end() || it->second->ended) return nullptr;
+  it->second->ref(); return it->second;
+}
+void closeXcv(const std::shared_ptr<AudioXcv>& x) {
+  audio::LiveInput* old = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_sendMu);
+    if (x->closed) return;
+    x->closed = true; old = x->input; x->input = nullptr;
+    g_sending.erase(std::remove(g_sending.begin(), g_sending.end(), x), g_sending.end());
+    if (x->enc) { opus_encoder_destroy(x->enc); x->enc = nullptr; }
+  }
+  retire(old);
+  if (x->remote) { x->remote->ended = true; g_remote.erase(x->remoteId); RemoteAudio* r = x->remote; x->remote = nullptr; g_svc->loop->post([r] { r->unref(); }); }
+  x->track.reset();
+}
+std::shared_ptr<AudioXcv> xcv(const v8::FunctionCallbackInfo<v8::Value>& a) { auto it = g_xcv.find(bind::i32(a, 0)); return it == g_xcv.end() ? nullptr : it->second; }
+void audioAdd(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  PC_OR_THROW
+  const int pcId = bind::i32(a, 0); const std::string mid = bind::string(a, 1); const int pt = (int)bind::num(a, 2, 111);
+  guarded(a, [&] {
+    auto x = std::make_shared<AudioXcv>(); x->pc = pcId;
+    x->ssrc = (uint32_t)(((uint64_t)std::rand() << 16) ^ (uint64_t)std::rand()) | 1u;
+    const std::string stream = "webxr-host-" + std::to_string(pcId), trackId = "audio-" + mid;
+    rtc::Description::Audio media(mid, rtc::Description::Direction::SendRecv);
+    media.addOpusCodec(pt);
+    media.addSSRC(x->ssrc, std::string("webxr-host"), stream, trackId);
+    x->track = p->addTrack(media);
+    auto cfg = std::make_shared<rtc::RtpPacketizationConfig>(x->ssrc, "webxr-host", (uint8_t)pt, rtc::OpusRtpPacketizer::DefaultClockRate);
+    auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(cfg);
+    packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(cfg));
+    packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+    packetizer->addToChain(std::make_shared<rtc::OpusRtpDepacketizer>());  // what arrives: RTP -> Opus frames
+    x->track->setMediaHandler(packetizer);
+    x->remote = new RemoteAudio(); x->remoteId = g_nextRemote++; g_remote[x->remoteId] = x->remote;
+    RemoteAudio* r = x->remote; r->ref();  // the frame callback's own reference, dropped with the track
+    std::shared_ptr<void> hold(nullptr, [r](void*) { g_svc->loop->post([r] { r->unref(); }); });
+    x->track->onFrame([r, hold, pt](rtc::binary data, rtc::FrameInfo info) {
+      if (info.payloadType && info.payloadType != pt) return;  // comfort noise, DTMF: not Opus
+      r->packet(data.data(), data.size(), info.timestamp);
+    });
+    int e = 0; x->enc = opus_encoder_create(48000, 1, OPUS_APPLICATION_VOIP, &e);
+    if (x->enc) { opus_encoder_ctl(x->enc, OPUS_SET_INBAND_FEC(1)); opus_encoder_ctl(x->enc, OPUS_SET_PACKET_LOSS_PERC(10)); }
+    const int xid = g_nextId++; g_xcv[xid] = x;
+    { std::lock_guard<std::mutex> lk(g_sendMu); g_sending.push_back(x); }
+    ensureSender();
+    v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext();
+    v8::Local<v8::Array> out = v8::Array::New(iso, 2);
+    out->Set(ctx, 0, v8::Number::New(iso, xid)).Check(); out->Set(ctx, 1, v8::Number::New(iso, x->remoteId)).Check();
+    a.GetReturnValue().Set(out);
+  });
+}
+void audioSource(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  auto x = xcv(a); if (!x) return;
+  audio::LiveInput* in = captureInput(bind::u32(a, 1)), *old = nullptr;
+  { std::lock_guard<std::mutex> lk(g_sendMu); if (x->closed) { old = in; } else { old = x->input; x->input = in; x->cursor = audio::LiveCursor{}; } }
+  retire(old);
+}
+void audioBitrate(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  auto x = xcv(a); if (!x) return;
+  std::lock_guard<std::mutex> lk(g_sendMu); x->bitrate = std::clamp((int)bind::num(a, 1, 32000), 6000, 128000);
+}
+void audioStats(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext();
+  auto x = xcv(a); if (!x) { a.GetReturnValue().SetNull(); return; }
+  uint64_t sent; { std::lock_guard<std::mutex> lk(g_sendMu); sent = x->sent; }
+  v8::Local<v8::Array> out = v8::Array::New(iso, 3);
+  out->Set(ctx, 0, v8::Number::New(iso, x->remote ? (double)x->remote->packets.load() : 0)).Check();
+  out->Set(ctx, 1, v8::Number::New(iso, (double)sent)).Check();
+  out->Set(ctx, 2, v8::Boolean::New(iso, x->track && x->track->isOpen())).Check();
+  a.GetReturnValue().Set(out);
+}
+void audioClose(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  auto it = g_xcv.find(bind::i32(a, 0)); if (it == g_xcv.end()) return;
+  auto x = it->second; g_xcv.erase(it); closeXcv(x);
+}
+void closeXcvsOf(int pcId) {
+  for (auto it = g_xcv.begin(); it != g_xcv.end();) { if (it->second->pc == pcId) { closeXcv(it->second); it = g_xcv.erase(it); } else ++it; }
+}
+#else
+void closeXcvsOf(int) {}
+#endif
+
 void onEvent(const v8::FunctionCallbackInfo<v8::Value>& a) {
   if (!a[0]->IsFunction()) return;
   g_onEvent.Reset(a.GetIsolate(), a[0].As<v8::Function>()); g_ctx.Reset(a.GetIsolate(), a.GetIsolate()->GetCurrentContext());
@@ -250,7 +444,13 @@ void installRtc(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostSe
   bind::fn(ctx, r, "wsOpen", wsOpen); bind::fn(ctx, r, "wsSend", wsSend); bind::fn(ctx, r, "wsClose", wsClose); bind::fn(ctx, r, "wsBuffered", wsBuffered);
   bind::fn(ctx, r, "pcCreate", pcCreate); bind::fn(ctx, r, "pcCreateOffer", pcCreateOffer); bind::fn(ctx, r, "pcCreateAnswer", pcCreateAnswer);
   bind::fn(ctx, r, "pcSetLocal", pcSetLocal); bind::fn(ctx, r, "pcSetRemote", pcSetRemote); bind::fn(ctx, r, "pcAddCandidate", pcAddCandidate);
-  bind::fn(ctx, r, "pcLocal", pcLocal); bind::fn(ctx, r, "pcRemote", pcRemote); bind::fn(ctx, r, "pcCreateDataChannel", pcCreateDataChannel); bind::fn(ctx, r, "pcClose", pcClose);
+  bind::fn(ctx, r, "pcSignaling", pcSignaling); bind::fn(ctx, r, "pcLocal", pcLocal); bind::fn(ctx, r, "pcRemote", pcRemote); bind::fn(ctx, r, "pcCreateDataChannel", pcCreateDataChannel); bind::fn(ctx, r, "pcClose", pcClose);
+#ifdef HOST_HAS_WEBRTC_MEDIA
+  bind::fn(ctx, r, "audioAdd", audioAdd); bind::fn(ctx, r, "audioSource", audioSource); bind::fn(ctx, r, "audioBitrate", audioBitrate);
+  bind::fn(ctx, r, "audioStats", audioStats); bind::fn(ctx, r, "audioClose", audioClose);
+  setRtcLiveInputs(&remoteInput);
+  HOST_LOGI("rtc: audio tracks (Opus over SRTP)");
+#endif
   bind::fn(ctx, r, "dcSend", dcSend); bind::fn(ctx, r, "dcClose", dcClose); bind::fn(ctx, r, "dcBuffered", dcBuffered); bind::fn(ctx, r, "dcLowThreshold", dcLowThreshold); bind::fn(ctx, r, "dcInfo", dcInfo);
   HOST_LOGI("rtc: WebSocket and WebRTC data channels (libdatachannel %s)", RTC_VERSION);
 }
