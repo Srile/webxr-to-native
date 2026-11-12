@@ -12,7 +12,7 @@ function sandbox({ media = true } = {}) {
     onEvent: (f) => { onEvent = f }, pcCreate: () => ++id, pcClose() {}, pcCreateOffer: () => 'v=0', pcCreateAnswer: () => 'v=0',
     pcSetLocal: (pc, type) => { calls.push(['pcSetLocal', type]); if (type === 'offer') state.signaling = 'have-local-offer'; else if (type === 'answer' || type === 'rollback') state.signaling = 'stable'; return false },
     pcSetRemote: (pc, sdp, type) => { calls.push(['pcSetRemote', type]); state.signaling = type === 'offer' ? 'have-remote-offer' : 'stable' },
-    pcSignaling: () => state.signaling,
+    pcSignaling: () => state.signaling, pcLocal: () => state.local ?? null, pcRemote: () => null,
   }
   if (media) Object.assign(base, {
     audioAdd: (pc, mid, pt) => { calls.push(['audioAdd', mid, pt]); return [++xid, ++remote] },
@@ -105,4 +105,45 @@ test('close ends the remote tracks; a build without media still refuses addTrack
   const none = sandbox({ media: false })
   assert.throws(() => new none.g.RTCPeerConnection().addTrack(mic()), /no media/)
   assert.equal(none.g.RTCRtpTransceiver, undefined)
+})
+
+test('negotiationneeded: an addition the description in place carries asks for nothing; a removal asks', async () => {
+  const { g, state } = sandbox()
+  const pc = new g.RTCPeerConnection(); let needed = 0
+  pc.onnegotiationneeded = () => needed++
+  // The peer's offer, then the page's track, then the answer, in one task: the answer carries the track's m-line.
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer('0') })
+  const sender = pc.addTrack(mic(6))
+  await pc.setLocalDescription(); state.local = ['answer', offer('0')]
+  await new Promise(r => setTimeout(r, 2)); assert.equal(needed, 0)
+  pc.removeTrack(sender)
+  await new Promise(r => setTimeout(r, 2)); assert.equal(needed, 1)
+  // A transceiver with no m-line yet does ask.
+  pc.addTransceiver('audio')
+  await new Promise(r => setTimeout(r, 2)); assert.equal(needed, 2)
+})
+
+test('the first data channel asks for negotiation unless the description carries the data line already', async () => {
+  const { g, state } = sandbox()
+  g.__native.rtc.pcCreateDataChannel = () => 50; g.__native.rtc.dcInfo = () => ['state', '', -1, true, -1, -1]
+  const pc = new g.RTCPeerConnection(); let needed = 0
+  pc.onnegotiationneeded = () => needed++
+  pc.createDataChannel('game')
+  await new Promise(r => setTimeout(r, 2)); assert.equal(needed, 1)
+  const pc2 = new g.RTCPeerConnection(); let needed2 = 0
+  pc2.onnegotiationneeded = () => needed2++
+  state.local = ['answer', 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:1\r\n']
+  pc2.createDataChannel('state', { negotiated: true, id: 1 })
+  await new Promise(r => setTimeout(r, 2)); assert.equal(needed2, 0)
+})
+
+test('a remote offer over one not yet answered replaces it (rolled back first), keeping its transceivers', async () => {
+  const { g, calls } = sandbox()
+  const pc = new g.RTCPeerConnection(); const events = []
+  pc.ontrack = (e) => events.push(e)
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer('0') })
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer('0') })
+  assert.deepEqual(calls.filter(c => c[0] === 'pcSetRemote').map(c => c[1]), ['offer', 'rollback', 'offer'])
+  assert.equal(calls.filter(c => c[0] === 'audioAdd').length, 1); assert.equal(events.length, 1)
+  assert.equal(pc.signalingState, 'have-remote-offer')
 })

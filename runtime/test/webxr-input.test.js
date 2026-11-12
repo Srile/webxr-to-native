@@ -289,3 +289,28 @@ test("a controller's targetRay has Quest Browser's roll: its +X along the grip's
   const aimZ = [2 * (aim[0] * aim[2] + aim[3] * aim[1]), 2 * (aim[1] * aim[2] - aim[3] * aim[0]), 1 - 2 * (aim[0] * aim[0] + aim[1] * aim[1])]
   for (let i = 0; i < 3; i++) near(ray[8 + i], aimZ[i], 1e-4)
 })
+
+test("a runtime whose aim +X already follows the grip's (SteamVR's) keeps its aim as the targetRay, kept while the grip is lost", async () => {
+  const h = harness()
+  const { s } = await session(h)
+  setController(h.input, 0)
+  const mul = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]]
+  const grip = [0.2, 0.3, -0.1, 0.927], n = Math.hypot(...grip); for (let i = 0; i < 4; i++) grip[i] /= n
+  const aim = mul(grip, [Math.sin(-Math.PI / 6), 0, 0, Math.cos(-Math.PI / 6)])  // pitched only: no half turn
+  const b = 0 * I.STRIDE
+  h.input.set(grip, b + I.GRIP_QUAT); h.input.set(aim, b + I.AIM_QUAT)
+  const floor = await s.requestReferenceSpace('local-floor')
+  let ray, gp
+  s.requestAnimationFrame((t, f) => { const src = s.inputSources[0]; ray = f.getPose(src.targetRaySpace, floor).transform.orientation; gp = f.getPose(src.gripSpace, floor) })
+  h.tick()
+  const q = [ray.x, ray.y, ray.z, ray.w], sign = Math.sign(q[3]) === Math.sign(aim[3]) ? 1 : -1
+  for (let i = 0; i < 4; i++) near(q[i] * sign, aim[i], 1e-4)
+  // The grip lost for a frame: the aim keeps the turn last decided (none here).
+  h.input[b + I.GRIP_VALID] = 0
+  s.requestAnimationFrame((t, f) => { ray = f.getPose(s.inputSources[0].targetRaySpace, floor).transform.orientation })
+  h.tick()
+  const q2 = [ray.x, ray.y, ray.z, ray.w], sign2 = Math.sign(q2[3]) === Math.sign(aim[3]) ? 1 : -1
+  for (let i = 0; i < 4; i++) near(q2[i] * sign2, aim[i], 1e-4)
+  assert.ok(gp)
+})

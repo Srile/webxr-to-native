@@ -2,11 +2,12 @@
 
 Run an unmodified WebXR web game as a native app on Meta Quest and the Steam Frame, without a browser.
 
-> This is a fork of [Srile/webxr-to-native](https://github.com/Srile/webxr-to-native). It adds
+> This is a fork of [Srile/webxr-to-native](https://github.com/Srile/webxr-to-native), kept merged with it. It adds
 > [Steam Frame support](#steam-frame) and what came up on the way there: a fuller Canvas 2D (anti-aliased fills,
 > dashes, transforms, the whole SVG path grammar, fallback and colour-emoji fonts, a text cache), `<audio>`
-> elements, AAC decoding, WebRTC Opus voice, a Steamworks module, and a fix for WebSocket messages over 16 KiB on
-> TLS. Each is listed below where it belongs.
+> elements, AAC decoding, a Steamworks module, and a fix for WebSocket messages over 16 KiB on TLS. On upstream's
+> WebRTC voice (whose jitter margin and FEC came from here) it adds receiver reports, so a browser peer puts FEC in
+> what it sends, and browser-like renegotiation. Each is listed below where it belongs.
 
 The game stays a web app: a three.js / IWSDK, Wonderland Engine or plain WebGL 2 build with its `index.html` and
 assets. webxr-to-native is the runtime underneath:

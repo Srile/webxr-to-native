@@ -243,10 +243,25 @@ export function install(g) {
         fire(this, 'track', new RTCTrackEvent('track', { receiver: t.receiver, track: t.receiver.track, streams, transceiver: t }))
       }
     }
-    _needNegotiation() {
+    // negotiationneeded once the connection is stable, after the task that changed what it carries. An addition (a
+    // track, a transceiver, the first data channel) asks only if the description in place lacks it, as a browser checks
+    // before firing: an answer made after the page added its track already carries it, and a needless offer collides
+    // with the peer's next one. A removal or a direction change always asks.
+    _needNegotiation(always = true) {
+      this._negotiateAlways = this._negotiateAlways || always
       if (this._negotiation || this._closed) return
       this._negotiation = true
-      g.setTimeout(() => { this._negotiation = false; if (!this._closed && this.signalingState === 'stable') fire(this, 'negotiationneeded') }, 0)
+      g.setTimeout(() => {
+        const always = this._negotiateAlways; this._negotiation = false; this._negotiateAlways = false
+        if (!this._closed && this.signalingState === 'stable' && (always || this._unnegotiated())) fire(this, 'negotiationneeded')
+      }, 0)
+    }
+    _unnegotiated() {
+      const sdp = this.localDescription?.sdp
+      if (!sdp) return true
+      if (this._channels.size && !/\nm=application /.test('\n' + sdp)) return true
+      const lines = new Set(String(sdp).split(/\r?\n/))
+      return this._xcvs.some(t => !t.stopped && (!t.mid || !lines.has('a=mid:' + t.mid)))
     }
     getSenders() { return this._xcvs.filter(t => !t.stopped).map(t => t.sender) }
     getReceivers() { return this._xcvs.filter(t => !t.stopped).map(t => t.receiver) }
@@ -260,7 +275,7 @@ export function install(g) {
       let t = this._xcvs.find(x => !x.stopped && !x._used && x.sender.track === null && x._xid && x.direction === 'recvonly')
       if (t) t._direction = 'sendrecv'; else { t = new RTCRtpTransceiver(this, 'sendrecv'); this._xcvs.push(t) }
       t._used = true; t.sender.track = track; t._source()
-      this._needNegotiation()
+      this._needNegotiation(false)
       return t.sender
     }
     addTransceiver(trackOrKind, init = {}) {
@@ -270,7 +285,7 @@ export function install(g) {
       if (kind !== 'audio') throw err('NotSupportedError', 'RTCPeerConnection: audio transceivers only on this host')
       const t = new RTCRtpTransceiver(this, init.direction ?? 'sendrecv'); this._xcvs.push(t)
       if (track) { t._used = true; t.sender.track = track }
-      this._needNegotiation()
+      this._needNegotiation(false)
       return t
     }
     removeTrack(sender) {
@@ -286,7 +301,16 @@ export function install(g) {
       // Waits for the description event only when native made a new one (not for a rollback, or an offer it ignored).
       return this._call(() => new Promise((resolve) => { if (type === 'offer') this._attach(); else if (type === 'rollback' && MEDIA) this._unbindUnanswered(); this._localWaiters.push(resolve); if (!N.pcSetLocal(this._id, type)) { this._localWaiters.splice(this._localWaiters.indexOf(resolve), 1); resolve() } }))
     }
-    setRemoteDescription(desc) { return this._call(() => { if (!desc || !desc.sdp) throw err('TypeError', 'setRemoteDescription: no SDP'); this._remoteAudio(desc.type, desc.sdp, () => N.pcSetRemote(this._id, desc.sdp, desc.type)); this._sctp = { maxMessageSize: 262144, state: 'connecting', transport: null } }) }
+    setRemoteDescription(desc) {
+      return this._call(() => {
+        if (!desc || !desc.sdp) throw err('TypeError', 'setRemoteDescription: no SDP')
+        // An offer over one not yet answered (the peer sent it again): replaced, as a browser does; libdatachannel
+        // accepts a remote offer only from stable (or over its own offer, which it rolls back).
+        if (desc.type === 'offer' && this.signalingState === 'have-remote-offer') N.pcSetRemote(this._id, '', 'rollback')
+        this._remoteAudio(desc.type, desc.sdp, () => N.pcSetRemote(this._id, desc.sdp, desc.type))
+        this._sctp = { maxMessageSize: 262144, state: 'connecting', transport: null }
+      })
+    }
     addIceCandidate(c) {
       return this._call(() => {
         if (!c || !c.candidate) return  // end of candidates
@@ -295,6 +319,7 @@ export function install(g) {
     }
     createDataChannel(label, init = {}) {
       this._live()
+      if (!this._channels.size && MEDIA) this._needNegotiation(false)  // the first channel, as a browser (with audio: perfect negotiation)
       const dcId = N.pcCreateDataChannel(this._id, String(label ?? ''), init.ordered !== false, init.maxRetransmits ?? -1, init.maxPacketLifeTime ?? -1, !!init.negotiated, init.id ?? -1, String(init.protocol ?? ''))
       const dc = new RTCDataChannel(dcId); dc.negotiated = !!init.negotiated; this._channels.add(dc)
       return dc

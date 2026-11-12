@@ -378,6 +378,10 @@ void audioAdd(const v8::FunctionCallbackInfo<v8::Value>& a) {
     packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(cfg));
     packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
     packetizer->addToChain(std::make_shared<rtc::OpusRtpDepacketizer>());  // what arrives: RTP -> Opus frames
+    // Receiver reports for what arrives (answering each sender report): the sender learns the loss it causes, and a
+    // browser's Opus encoder only puts in-band FEC in its packets once loss is reported. Last in the chain, so it
+    // sees the RTP before the depacketizer (incoming runs from the chain's end); it keeps the RTCP to itself.
+    packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     x->track->setMediaHandler(packetizer);
     x->remoteId = g_nextRemote++; x->remote = new RemoteAudio(x->remoteId); g_remote[x->remoteId] = x->remote;
     RemoteAudio* r = x->remote; r->ref();  // the frame callback's own reference, dropped with the track
