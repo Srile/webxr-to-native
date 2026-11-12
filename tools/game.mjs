@@ -24,7 +24,7 @@ export function gameArg(args) {
 export function ensureWebrtcSources(cfg) {
   if (cfg.network?.webrtc !== true) return
   const ldc = join(root, 'third_party/libdatachannel')
-  if (!existsSync(join(ldc, '.stamp-v0.24.6-3')) || (cfg.media?.microphone === true && !existsSync(join(ldc, 'deps/libsrtp/.stamp-2.7.0'))))
+  if (!existsSync(join(ldc, '.stamp-v0.24.6-6')) || (cfg.media?.microphone === true && !existsSync(join(ldc, 'deps/libsrtp/.stamp-2.7.0'))))
     execFileSync('bash', [join(root, 'tools/setup-webrtc.sh')], { stdio: 'inherit' })
 }
 // The CMake switch for a window host's build directory (mac, linux): its -D define, and whether the directory was

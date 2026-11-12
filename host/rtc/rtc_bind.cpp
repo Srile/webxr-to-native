@@ -151,6 +151,13 @@ std::string urlEncode(const std::string& s) {
 void pcCreate(const v8::FunctionCallbackInfo<v8::Value>& a) {
   v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext();
   rtc::Configuration cfg; cfg.disableAutoNegotiation = true;  // the page negotiates, as in a browser
+#ifdef HOST_HAS_WEBRTC_MEDIA
+  // DTLS-SRTP from the start, as a browser has it: a connection that begins with data channels only can take audio
+  // later (libdatachannel otherwise picks plain DTLS when the first description has no media, and a track added
+  // after cannot open). Browsers and libdatachannel always negotiate DTLS-SRTP (RFC 8827); a peer that does not
+  // keeps its data channels (tools/patches/libdatachannel-0.24.6-srtp-optional.patch).
+  cfg.forceMediaTransport = true;
+#endif
   if (bind::boolean(a, 1)) cfg.iceTransportPolicy = rtc::TransportPolicy::Relay;
   auto get = [&](v8::Local<v8::Object> o, const char* k) { v8::Local<v8::Value> v; return o->Get(ctx, bind::str(iso, k)).ToLocal(&v) && v->IsString() ? Engine::toStdString(iso, v) : std::string(); };
   if (a.Length() > 0 && a[0]->IsArray()) {

@@ -1,0 +1,17 @@
+--- a/src/impl/dtlssrtptransport.cpp
++++ b/src/impl/dtlssrtptransport.cpp
+@@ -266,6 +266,14 @@
+ 
+ 	mbedtls_dtls_srtp_info srtpInfo;
+ 	mbedtls_ssl_get_dtls_srtp_negotiation_result(&mSsl, &srtpInfo);
++	// A peer that negotiated no SRTP (RFC 8827 requires it of WebRTC endpoints, but a bare DTLS/SCTP peer may not)
++	// keeps its data channels: SRTP stays off (media is refused, nothing is demultiplexed as SRTP) instead of the
++	// handshake failing the connection. This transport is forced on connections that start without media, so that
++	// media can be added later, and must not lose a connection plain DTLS would have kept.
++	if (srtpInfo.MBEDTLS_PRIVATE(chosen_dtls_srtp_profile) == MBEDTLS_TLS_SRTP_UNSET) {
++		PLOG_WARNING << "The peer negotiated no SRTP profile: data channels only on this connection";
++		return;
++	}
+ 	if (srtpInfo.MBEDTLS_PRIVATE(chosen_dtls_srtp_profile) != MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80)
+ 		throw std::runtime_error("Failed to get SRTP profile");
+ 

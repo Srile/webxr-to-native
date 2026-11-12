@@ -77,8 +77,8 @@ Everything here is MIT (LICENSE) except:
 - `host/win/khr/KHR/khrplatform.h`: derived from the Khronos Group's `khrplatform.h`. Its MIT-style notice is in
   the file.
 - `tools/patches/`: changes to the projects they patch, under those projects' licences.
-  - `libdatachannel-0.24.6-mbedtls-verify.patch`, `libdatachannel-0.24.6-mbedtls-partial-write.patch` and
-    `libdatachannel-0.24.6-track-mid-reuse.patch`: MPL-2.0.
+  - `libdatachannel-0.24.6-*.patch` (mbedtls-verify, mbedtls-partial-write, track-mid-reuse, sctp-mid-session,
+    sctp-start-order, srtp-optional): MPL-2.0.
   - `v8-apple/0001-xros-target-platform.patch` and `angle-apple/0002-xros-codesign-bundle-kind.patch`: they patch
     Chromium's build files, BSD-3-Clause.
 - `licenses/`: the upstream licence texts, each under its own terms.
