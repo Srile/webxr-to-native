@@ -5,7 +5,8 @@
 // MediaStream, MediaStreamTrack, MediaStreamTrackEvent, OverconstrainedError, MediaStreamAudioSourceNode (with
 // AudioContext.createMediaStreamSource), and navigator.permissions.query({ name: 'microphone' }).
 // Not here: video (getUserMedia with video rejects NotFoundError: no camera), getDisplayMedia, MediaRecorder,
-// createMediaStreamDestination, WebRTC media tracks (RTCPeerConnection.addTrack still throws).
+// createMediaStreamDestination. WebRTC audio tracks are rtc/'s (a build with network.webrtc as well): it sends
+// these tracks and makes remote ones here (__hostMedia.remoteTrack), which createMediaStreamSource plays alike.
 //
 // Constraints, as browsers treat them: a bare value or { ideal } is a preference, { exact } (and min / max for the
 // numbers) a requirement; an unsatisfiable requirement rejects with OverconstrainedError naming it. The device is
@@ -108,11 +109,16 @@ export function install(g) {
       super(); this[HANDLERS] = Object.create(null)
       this.kind = 'audio'; this.id = g.crypto.randomUUID(); this.label = info.label ?? ''; this.contentHint = ''
       this._info = info; this._nid = info.id; this._constraints = constraints ? { ...constraints } : {}
-      this._enabled = true; this._state = info.id ? 'live' : 'ended'; this._streams = new Set()
-      if (this._nid) { byId.set(this._nid, this); if (this._state === 'live') live.add(this) }
+      // A remote track (an RTCRtpReceiver's, rtc/): live from the start, its native id given once the transceiver
+      // has one (_setNative); the rtc binding owns it, so stop() and enabled touch no capture.
+      this._remote = !!info.remote
+      this._enabled = true; this._state = info.id || this._remote ? 'live' : 'ended'; this._streams = new Set()
+      if (this._nid && !this._remote) { byId.set(this._nid, this); if (this._state === 'live') live.add(this) }
     }
+    _setNative(nid) { this._nid = nid; if (!this._enabled) this._remoteEnabled() }
+    _remoteEnabled() { if (this._nid) g.__native.rtc?.audioRemoteEnabled?.(this._nid, this._enabled) }
     get enabled() { return this._enabled }
-    set enabled(v) { this._enabled = !!v; if (this._nid && this._state === 'live') N.setEnabled(this._nid, this._enabled) }
+    set enabled(v) { this._enabled = !!v; if (this._remote) this._remoteEnabled(); else if (this._nid && this._state === 'live') N.setEnabled(this._nid, this._enabled) }
     get muted() { return false }
     get readyState() { return this._state }
     stop() { this._end(false) }
@@ -120,12 +126,13 @@ export function install(g) {
     _end(fire) {
       if (this._state === 'ended') return
       this._state = 'ended'; live.delete(this)
-      if (this._nid) { N.stop(this._nid); if (reg) reg.register(this, this._nid) }
+      if (this._nid && !this._remote) { N.stop(this._nid); if (reg) reg.register(this, this._nid) }
       if (fire) this.dispatchEvent(new Event('ended'))
       for (const s of this._streams) s._trackEnded()
     }
     clone() {
-      if (this._state === 'ended' || this._info.remote) return new MediaStreamTrack(TOKEN, { ...this._info, id: 0 }, this._constraints)
+      if (this._remote) { const t = new MediaStreamTrack(TOKEN, { ...this._info, id: this._nid, remote: true }, {}); if (this._state === 'ended') t._state = 'ended'; return t }
+      if (this._state === 'ended') return new MediaStreamTrack(TOKEN, { ...this._info, id: 0 }, this._constraints)
       const r = N.open(processing(this._constraints, capsNow()))
       const t = new MediaStreamTrack(TOKEN, typeof r === 'string' ? { ...this._info, id: 0 } : r, this._constraints)
       t.enabled = this._enabled
@@ -247,8 +254,9 @@ export function install(g) {
     g.AudioContext.prototype.createMediaStreamSource = function createMediaStreamSource(stream) { return new MediaStreamAudioSourceNode(this, { mediaStream: stream }) }
   }
 
-  // A WebRTC receiver's track (rtc/index.js): a voice arriving over the network, read like a microphone's.
-  Object.defineProperty(g, '__hostRemoteTrack', { configurable: true, value: (id, label) => new MediaStreamTrack(TOKEN, { id, label: label ?? '', remote: true, deviceId: '', groupId: '', sampleRate: 48000, echoCancellation: false, autoGainControl: false, noiseSuppression: false }, {}) })
+  // For rtc/ (RTCRtpReceiver.track): a live remote audio track, its native id set when its transceiver has one.
+  Object.defineProperty(g, '__hostMedia', { value: Object.freeze({ remoteTrack: (label = 'remote audio') => new MediaStreamTrack(TOKEN, { id: 0, remote: true, label }, {}) }), configurable: true })
+
   Object.assign(g, { MediaStream, MediaStreamTrack, MediaStreamTrackEvent, MediaDevices, MediaDeviceInfo, InputDeviceInfo, OverconstrainedError })
   g.webkitMediaStream = MediaStream  // webaudio/'s stub set it to its inert class (adapter.js reads it)
   if (MediaStreamAudioSourceNode) g.MediaStreamAudioSourceNode = MediaStreamAudioSourceNode

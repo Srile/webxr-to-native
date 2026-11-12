@@ -265,3 +265,27 @@ test('hand gamepad: five buttons — index pinch selects, the menu gesture sits 
   assert.ok(gripPos !== null)
   near(gripPos[0], -0.2)
 })
+
+test("a controller's targetRay has Quest Browser's roll: its +X along the grip's, its direction OpenXR's aim", async () => {
+  const h = harness()
+  const { s } = await session(h)
+  setController(h.input, 0)
+  // What a Quest 3's OpenXR runtime reports (measured): the aim is the grip pitched 60 degrees down about X and turned
+  // half a turn about its own forward axis, so the aim's +X is the opposite of the grip's.
+  const mul = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]]
+  const grip = [0.2, 0.3, -0.1, 0.927], n = Math.hypot(...grip); for (let i = 0; i < 4; i++) grip[i] /= n
+  const pitch = [Math.sin(-Math.PI / 6), 0, 0, Math.cos(-Math.PI / 6)], half = [0, 0, 1, 0]
+  const aim = mul(mul(grip, pitch), half)
+  const b = 0 * I.STRIDE
+  h.input.set(grip, b + I.GRIP_QUAT); h.input.set(aim, b + I.AIM_QUAT)
+  const floor = await s.requestReferenceSpace('local-floor')
+  let ray, gp
+  s.requestAnimationFrame((t, f) => { const src = s.inputSources[0]; ray = f.getPose(src.targetRaySpace, floor).transform.matrix.slice(); gp = f.getPose(src.gripSpace, floor).transform.matrix.slice() })
+  h.tick()
+  const dot = (m, k, o, l) => m[k] * o[l] + m[k + 1] * o[l + 1] + m[k + 2] * o[l + 2]
+  assert.ok(dot(ray, 0, gp, 0) > 0.95, "the ray's +X follows the grip's")
+  // The direction is OpenXR's aim: -Z of the turned pose is -Z of the aim (a half turn about Z keeps Z).
+  const aimZ = [2 * (aim[0] * aim[2] + aim[3] * aim[1]), 2 * (aim[1] * aim[2] - aim[3] * aim[0]), 1 - 2 * (aim[0] * aim[0] + aim[1] * aim[1])]
+  for (let i = 0; i < 3; i++) near(ray[8 + i], aimZ[i], 1e-4)
+})

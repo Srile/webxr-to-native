@@ -1,6 +1,5 @@
 # WebSocket and WebRTC data channels (WP-21), only in a build for a game whose host.json says network.webrtc
-# (HOST_WEBRTC: tools/pack.mjs and tools/mac.mjs set it). libdatachannel 0.24.6 (with media, for Opus audio, only when
-# the game has the microphone too: HOST_RTC_AUDIO), over Mbed TLS 3.6.7,
+# (HOST_WEBRTC: tools/pack.mjs and tools/mac.mjs set it). libdatachannel 0.24.6 without media, over Mbed TLS 3.6.7,
 # both from source (tools/setup-webrtc.sh), static, into the host's one library. A game without it builds none of it.
 function(host_enable_webrtc target)
   if(NOT EXISTS ${TP}/libdatachannel/CMakeLists.txt OR NOT EXISTS ${TP}/mbedtls/CMakeLists.txt)
@@ -23,15 +22,20 @@ function(host_enable_webrtc target)
     foreach(opt USE_MBEDTLS NO_EXAMPLES NO_TESTS)
       set(${opt} ON CACHE BOOL "" FORCE)
     endforeach()
-    # Media (WebRTC audio) only with the microphone too: libSRTP (its own AES and HMAC-SHA1, enough for WebRTC's
-    # default SRTP profile) from tools/setup-webrtc.sh.
-    if(HOST_MICROPHONE)
+    # Audio tracks: with the microphone as well (media.microphone), libdatachannel's media (RTP, RTCP, SRTP over
+    # libsrtp with its own AES-CM/HMAC-SHA1; no second crypto library), and RTCPeerConnection.addTrack works.
+    if(HOST_MICROPHONE AND EXISTS ${TP}/libdatachannel/deps/libsrtp/CMakeLists.txt)
       set(NO_MEDIA OFF CACHE BOOL "" FORCE)
-      set(ENABLE_MBEDTLS OFF CACHE BOOL "" FORCE)
-      set(ENABLE_OPENSSL OFF CACHE BOOL "" FORCE)
-      set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)
+      foreach(opt ENABLE_MBEDTLS ENABLE_OPENSSL ENABLE_NSS LIBSRTP_TEST_APPS BUILD_WITH_WARNINGS)
+        set(${opt} OFF CACHE BOOL "" FORCE)
+      endforeach()
+      set(HOST_WEBRTC_MEDIA ON CACHE INTERNAL "")
     else()
+      if(HOST_MICROPHONE)
+        message(WARNING "HOST_WEBRTC: libsrtp is missing (run tools/setup-webrtc.sh): no audio tracks")
+      endif()
       set(NO_MEDIA ON CACHE BOOL "" FORCE)
+      set(HOST_WEBRTC_MEDIA OFF CACHE INTERNAL "")
     endif()
     set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
     set(NO_WEBSOCKET OFF CACHE BOOL "" FORCE)
@@ -40,9 +44,9 @@ function(host_enable_webrtc target)
   endif()
   target_link_libraries(${target} datachannel-static)  # the plain signature, as the host targets use
   target_compile_definitions(${target} PRIVATE HOST_HAS_WEBRTC)
-  if(HOST_MICROPHONE)
-    target_compile_definitions(${target} PRIVATE HOST_RTC_AUDIO)
-    target_link_libraries(${target} host_opus)
+  if(HOST_WEBRTC_MEDIA)
+    target_compile_definitions(${target} PRIVATE HOST_HAS_WEBRTC_MEDIA)
+    message(STATUS "${target}: WebRTC audio tracks (Opus over SRTP, libsrtp)")
   endif()
   # libdatachannel reports failures as exceptions; the binding catches them (the rest of the host builds without).
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/rtc/rtc_bind.cpp TARGET_DIRECTORY ${target} PROPERTIES COMPILE_OPTIONS "-fexceptions;-frtti")

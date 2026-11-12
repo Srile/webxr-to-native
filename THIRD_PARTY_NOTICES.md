@@ -59,6 +59,7 @@ the matching texts from `licenses/` in a `LICENSES/` folder.
 | [usrsctp](https://github.com/sctplab/usrsctp) | `fec583d5` | BSD-3-Clause | with libdatachannel | `network.webrtc` |
 | [plog](https://github.com/SergiusTheBest/plog) | `94899e0b` | MIT | with libdatachannel | `network.webrtc` |
 | [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) | 3.6.7 | Apache-2.0 (or GPL-2.0-or-later) | `tools/setup-webrtc.sh` | `network.webrtc` |
+| [libsrtp](https://github.com/cisco/libsrtp) | 2.7.0 | BSD-3-Clause | `tools/setup-webrtc.sh` | `network.webrtc` with `media.microphone` |
 
 The Linux host also loads the distribution's GLFW, libcurl, PulseAudio, EGL/GLES and X11 libraries, and macOS's
 host loads the system libcurl. Those belong to the system and are not copied into the app.

@@ -41,22 +41,6 @@ class MicTrack : public audio::LiveInput {
   audio::CaptureRing* ring_;
 };
 
-// A voice arriving over WebRTC (rtc/rtc_bind.cpp decodes it into the ring): read like a capture track, with a
-// margin for the network's jitter that follows it (JitterTarget: 60-240 ms; readers drift to it in quiet stretches)
-// and at most 250 ms more before the oldest is dropped.
-class RemoteTrack : public audio::LiveInput {
- public:
-  RemoteTrack() : ring(jitter.target(), 0.25, true) { ring.setRate(48000); }
-  std::atomic<bool> enabled{true}, ended{false};
-  audio::JitterTarget jitter;  // the receive thread's
-  audio::CaptureRing ring;
-  bool read(audio::LiveCursor& c, float* out, int n, double rate) override {
-    if (!enabled.load(std::memory_order_relaxed) || ended.load(std::memory_order_relaxed)) { c.primed = c.waiting = false; return false; }
-    return ring.read(c, out, n, rate);
-  }
-  bool live() const override { return !ended.load(std::memory_order_relaxed); }
-};
-
 class Capture;  // the platform's device (mic.cpp)
 
 class Mic {
@@ -71,8 +55,6 @@ class Mic {
   void release(uint32_t id);                 // stop + forget the id (the JS track is gone)
   bool setEnabled(uint32_t id, bool on);
   audio::LiveInput* input(uint32_t id);      // with a reference for the caller; null if unknown or ended
-  // A remote track (its own id range): takes a reference; stop/release/setEnabled/input then work on its id.
-  uint32_t addRemote(RemoteTrack* t);
   // The open device (valid while live() > 0), what it delivers.
   int live() const { return live_; }
   double rate() const;
@@ -93,9 +75,6 @@ class Mic {
   audio::CaptureRing* ring_;
   std::unique_ptr<Capture> dev_;
   std::unordered_map<uint32_t, MicTrack*> tracks_;  // one reference each, until release()
-  std::unordered_map<uint32_t, RemoteTrack*> remotes_;  // likewise; ids from kRemoteBase
-  static constexpr uint32_t kRemoteBase = 1u << 20;
-  uint32_t nextRemote_ = kRemoteBase;
   uint32_t nextId_ = 1, timer_ = 0, opens_ = 0; int live_ = 0; double toneHz_ = 0;
   Processing actual_, want_; std::string label_; const char* preset_ = "";
 };

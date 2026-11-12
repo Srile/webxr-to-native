@@ -76,9 +76,11 @@ development and experiments; the Quest is the main target, and the Steam Frame r
   - `fetch` and `XMLHttpRequest` read from the bundled assets, and from an allow-list of HTTPS origins.
   - `localStorage` and `Blob` URLs.
   - Opt-in per game:
-    - WebSocket and WebRTC data channels. With the microphone too, WebRTC Opus audio: `addTransceiver`,
-      `addTrack`, the `track` event, remote tracks for `<audio srcObject>` and `createMediaStreamSource`. Incoming
-      voice gets in-band FEC for lost packets and a jitter margin that follows the network (logged every 5 s).
+    - WebSocket and WebRTC data channels; with `media.microphone` too, WebRTC audio tracks (`addTrack`,
+      `addTransceiver`, `ontrack`): Opus over SRTP, the microphone sent, each peer's audio a track that
+      `createMediaStreamSource` and `<audio srcObject>` play. Interoperates with Chrome and Quest Browser peers.
+      Incoming voice is read behind a jitter margin that follows the network (60 to 240 ms), lost packets come back
+      from Opus's in-band FEC, and the log says every 5 s how each voice arrived.
     - IndexedDB and the Cache API, on SQLite, kept across launches, in the page and in workers.
     - Service workers. A registered worker answers the page's loads as `FetchEvent`s, and controls the page from
       the start of the next launch.
@@ -273,7 +275,7 @@ leaves one off carries none of its native code or permissions, and its page does
 | `web.svg` | `false` | SVG images (nanosvg) |
 | `web.serviceWorker` | `false` | `navigator.serviceWorker`; `debug.serviceWorker` logs every load it answers |
 | `network.allow` | `[]` | origins `fetch`, XHR and WebSocket may reach; everything else is refused |
-| `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game; with `media.microphone` too, Opus audio tracks (libSRTP; incoming voice gets a jitter margin that follows the network, in-band FEC for lost packets, and a log line every 5 s) |
+| `network.webrtc` | `false` | build WebSocket and WebRTC data channels (libdatachannel) into this game; with `media.microphone`, audio tracks too (libsrtp, Opus) |
 | `storage.indexedDB`, `storage.cache` | `false` | IndexedDB, the Cache API (SQLite, under the app's files) |
 | `storage.quotaMB` | `1024` | the origin's databases together; past it a write fails with `QuotaExceededError` |
 | `media.microphone` | `false` | `getUserMedia` for audio; adds the `RECORD_AUDIO` permission, asked for on first use (Android, macOS) |

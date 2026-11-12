@@ -39,17 +39,17 @@ if [ ! -f "$LDC/.stamp-v0.24.6-2" ]; then
   (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-mbedtls-partial-write.patch")
   touch "$LDC/.stamp-v0.24.6-2"
 fi
-# libSRTP (WebRTC audio: SRTP for the media libdatachannel carries) at the commit v0.24.6 pins, its own crypto.
-if [ ! -f "$LDC/deps/libsrtp/.stamp-24b3bf8" ]; then
-  fetch https://github.com/cisco/libsrtp/archive/24b3bf8f19b6f5ab4cd2bcceb4f4064efca86fd5.tar.gz \
-    063478e368d7cd13d04a908d152a46f90bfa728c4b324be6d413b0b92728207c "$LDC/deps/libsrtp"
-  rm -rf "$LDC/deps/libsrtp/test" "$LDC/deps/libsrtp/fuzzer"
-  touch "$LDC/deps/libsrtp/.stamp-24b3bf8"
-fi
 if [ ! -f "$TP/mbedtls/.stamp-3.6.7" ]; then
   fetch https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2 \
     a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6 "$TP/mbedtls"
   rm -rf "$TP/mbedtls/tests" "$TP/mbedtls/programs"
   touch "$TP/mbedtls/.stamp-3.6.7"
 fi
-log "libdatachannel 0.24.6, libSRTP 24b3bf8, Mbed TLS 3.6.7"
+# Audio tracks (RTCPeerConnection.addTrack, for a game with both network.webrtc and media.microphone) are sent and
+# received over SRTP: libsrtp 2.7.0, libdatachannel's pinned major version, with its built-in AES-CM/HMAC-SHA1.
+if [ ! -f "$LDC/deps/libsrtp/.stamp-2.7.0" ]; then
+  fetch https://github.com/cisco/libsrtp/archive/refs/tags/v2.7.0.tar.gz \
+    54facb1727a557c2a76b91194dcb2d0a453aaf8e2d0cbbf1e3c2848c323e28ad "$LDC/deps/libsrtp"
+  touch "$LDC/deps/libsrtp/.stamp-2.7.0"
+fi
+log "libdatachannel 0.24.6, Mbed TLS 3.6.7, libsrtp 2.7.0"

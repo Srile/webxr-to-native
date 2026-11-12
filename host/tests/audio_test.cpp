@@ -766,6 +766,19 @@ static void testVoiceIn() {
   in.packet(5, packets[0].data(), (int)packets[0].size(), sink); in.packet(6, packets[1].data(), (int)packets[1].size(), sink);
   CHECK(!in.packet(5, packets[0].data(), (int)packets[0].size(), sink) && in.late == 1 && sink.pcm.size() == 2 * 960, "a late packet dropped");
   opus_decoder_destroy(dec);
+  // By RTP timestamp (packetAt, what the rtc binding has): the same recovery, a late frame dropped, and a sender's
+  // silent stretch (a gap of a second or more) not filled.
+  {
+    OpusDecoder* d2 = opus_decoder_create(48000, 1, &e); PcmSink s2; OpusVoiceIn in2(d2);
+    const uint32_t t0 = 0xFFFFF000u;  // wraps past 2^32
+    for (int k = 0; k < 100; k++) if (!every7(k)) in2.packetAt(t0 + (uint32_t)k * 960, packets[k].data(), (int)packets[k].size(), s2);
+    CHECK(s2.pcm.size() == all.size() && in2.recovered == 14 && in2.concealed == 0, "by timestamp: %zu samples, %u recovered, %u concealed", s2.pcm.size(), in2.recovered, in2.concealed);
+    CHECK(!in2.packetAt(t0 + 50 * 960, packets[50].data(), (int)packets[50].size(), s2) && in2.late == 1, "by timestamp: a late frame dropped");
+    const size_t before = s2.pcm.size(); const uint32_t was = in2.recovered + in2.concealed;
+    in2.packetAt(t0 + 100 * 960 + 3 * 48000, packets[0].data(), (int)packets[0].size(), s2);
+    CHECK(s2.pcm.size() == before + 960 && in2.recovered + in2.concealed == was, "by timestamp: a silent stretch is not filled");
+    opus_decoder_destroy(d2);
+  }
 }
 #endif
 

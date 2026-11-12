@@ -19,9 +19,12 @@ export function gameArg(args) {
   return undefined
 }
 
-// host.json network.webrtc (WP-21): fetch the sources on first need (tools/setup-webrtc.sh).
+// host.json network.webrtc (WP-21): fetch the sources on first need (tools/setup-webrtc.sh); with media.microphone
+// as well, libsrtp for audio tracks (fetched before the first configure: CMake does not notice it arriving later).
 export function ensureWebrtcSources(cfg) {
-  if (cfg.network?.webrtc === true && !existsSync(join(root, 'third_party/libdatachannel/.stamp-v0.24.6')))
+  if (cfg.network?.webrtc !== true) return
+  const ldc = join(root, 'third_party/libdatachannel')
+  if (!existsSync(join(ldc, '.stamp-v0.24.6-2')) || (cfg.media?.microphone === true && !existsSync(join(ldc, 'deps/libsrtp/.stamp-2.7.0'))))
     execFileSync('bash', [join(root, 'tools/setup-webrtc.sh')], { stdio: 'inherit' })
 }
 // The CMake switch for a window host's build directory (mac, linux): its -D define, and whether the directory was

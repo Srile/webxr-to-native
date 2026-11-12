@@ -271,7 +271,6 @@ uint32_t Mic::open(const Processing& want, std::string* err) {
 }
 
 void Mic::stop(uint32_t id) {
-  if (auto r = remotes_.find(id); r != remotes_.end()) { r->second->ended.store(true); return; }
   auto it = tracks_.find(id);
   if (it == tracks_.end() || it->second->ended.load()) return;
   it->second->ended.store(true);
@@ -279,31 +278,18 @@ void Mic::stop(uint32_t id) {
   else HOST_LOGI("mic: track %u stopped (%d live)", id, live_);
 }
 
-uint32_t Mic::addRemote(RemoteTrack* t) {
-  t->ref();
-  const uint32_t id = nextRemote_++;
-  remotes_[id] = t;
-  return id;
-}
-
 void Mic::release(uint32_t id) {
-  if (auto r = remotes_.find(id); r != remotes_.end()) { r->second->ended.store(true); r->second->unref(); remotes_.erase(r); return; }
   stop(id);
   auto it = tracks_.find(id); if (it == tracks_.end()) return;
   it->second->unref(); tracks_.erase(it);
 }
 
 bool Mic::setEnabled(uint32_t id, bool on) {
-  if (auto r = remotes_.find(id); r != remotes_.end()) { r->second->enabled.store(on); return true; }
   auto it = tracks_.find(id); if (it == tracks_.end()) return false;
   it->second->enabled.store(on); return true;
 }
 
 audio::LiveInput* Mic::input(uint32_t id) {
-  if (auto r = remotes_.find(id); r != remotes_.end()) {
-    if (r->second->ended.load()) return nullptr;
-    r->second->ref(); return r->second;
-  }
   auto it = tracks_.find(id);
   if (it == tracks_.end() || it->second->ended.load()) return nullptr;
   it->second->ref(); return it->second;
