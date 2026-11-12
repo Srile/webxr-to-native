@@ -7,7 +7,8 @@ Run an unmodified WebXR web game as a native app on Meta Quest and the Steam Fra
 > dashes, transforms, the whole SVG path grammar, fallback and colour-emoji fonts, a text cache), `<audio>`
 > elements, AAC decoding, a Steamworks module, and a fix for WebSocket messages over 16 KiB on TLS. On upstream's
 > WebRTC voice (whose jitter margin and FEC came from here) it adds receiver reports, so a browser peer puts FEC in
-> what it sends, and browser-like renegotiation. Each is listed below where it belongs.
+> what it sends, browser-like renegotiation, and a libdatachannel fix for glare between two headsets. Each is listed
+> below where it belongs.
 
 The game stays a web app: a three.js / IWSDK, Wonderland Engine or plain WebGL 2 build with its `index.html` and
 assets. webxr-to-native is the runtime underneath:

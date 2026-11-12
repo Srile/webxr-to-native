@@ -2,8 +2,10 @@ libdatachannel 0.24.6 (only in games with host.json network.webrtc)
 https://github.com/paullouisageneau/libdatachannel
 Licence: MPL-2.0
 Source Code Form of this build: libdatachannel v0.24.6 (https://github.com/paullouisageneau/libdatachannel/archive/refs/tags/v0.24.6.tar.gz)
-with tools/patches/libdatachannel-0.24.6-mbedtls-verify.patch of https://github.com/Srile/webxr-to-native applied
-(TLS servers verified against a CA bundle); tools/setup-webrtc.sh fetches and patches it.
+with tools/patches/libdatachannel-0.24.6-*.patch of https://github.com/sherbondy/webxr-to-native applied
+(mbedtls-verify: TLS servers verified against a CA bundle; mbedtls-partial-write: a message longer than one TLS
+record sent whole; track-mid-reuse: a track may take the mid of one that is gone); tools/setup-webrtc.sh fetches
+and patches it.
 
 -------------------------------------------------------------------------------
 LICENSE
