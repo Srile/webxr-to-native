@@ -58,7 +58,7 @@ constexpr uint32_t kPipeEndWords = (uint32_t)((sizeof(PipeEnd) + 3) / 4);
 Host::Host(android_app* app) : app_(app) {}
 Host::~Host() {
   if (inspector_) inspector_->stop();
-  if (jsUp_) { store_.flush(); shutdownWorkers(); http_.shutdown(); store_.flush(); gc_.detach(); modules_.reset(); engine_.destroy(); Engine::shutdownPlatform(); }  // the saves first: nothing after may hold them up
+  if (jsUp_) { store_.flush(); shutdownWorkers(); http_.shutdown(); store_.flush(); gc_.detach(); loop_.clear(); modules_.reset(); engine_.destroy(); Engine::shutdownPlatform(); }  // the saves first: nothing after may hold them up; the page's pending timers and tasks before the engine (they hold its handles)
   if (clearUp_) clear_.shutdown();
   glq::stop();  // the context back on this thread for the teardown below
   if (xrInstance_) xr_.destroy();

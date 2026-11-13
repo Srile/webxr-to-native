@@ -1,5 +1,6 @@
 #include "core/loop.h"
 #include <cassert>
+#include <memory>
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -13,5 +14,12 @@ int main() {
   while (loop.timerCount() > 0 && spins++ < 1000) { deadline = loop.runOnce(); if (deadline > 0) std::this_thread::sleep_for(std::chrono::microseconds((int)(deadline * 1000))); }
   assert(order.size() >= 3); assert(order[0] == 1 && order[1] == 10); assert(order[2] == 2);
   for (int v : order) assert(v != 3);  // the repeating timer was cleared before it fired
+  // clear() drops every pending task and timer unrun, releasing what they hold (a shutting-down host's JS handles).
+  { host::Loop l; auto held = std::make_shared<int>(7); std::weak_ptr<int> w = held; bool ran = false;
+    l.post([held, &ran] { ran = true; }); l.setTimer(1000, false, [held, &ran] { ran = true; }); l.setTimer(1, true, [held, &ran] { ran = true; });
+    held.reset(); assert(!w.expired());
+    l.clear();
+    assert(w.expired() && l.timerCount() == 0 && !l.hasPendingTasks());
+    l.runOnce(); assert(!ran); }
   puts("loop_test ok"); return 0;
 }
