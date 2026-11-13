@@ -2,15 +2,6 @@
 
 Run an unmodified WebXR web game as a native app on Meta Quest and the Steam Frame, without a browser.
 
-> This is a fork of [Srile/webxr-to-native](https://github.com/Srile/webxr-to-native), kept merged with it. It adds
-> [Steam Frame support](#steam-frame) and what came up on the way there: a fuller Canvas 2D (anti-aliased fills,
-> dashes, transforms, the whole SVG path grammar, fallback and colour-emoji fonts, a text cache), `<audio>`
-> elements, AAC decoding, a Steamworks module, and a fix for WebSocket messages over 16 KiB on TLS. On upstream's
-> WebRTC voice (whose jitter margin and FEC came from here) it adds receiver reports, so a browser peer puts FEC in
-> what it sends, browser-like renegotiation, and libdatachannel fixes for glare between two headsets and for changing
-> a live call (a data channel added to a voice call, voice added to a data channel's). Each is listed below where it
-> belongs.
-
 The game stays a web app: a three.js / IWSDK, Wonderland Engine or plain WebGL 2 build with its `index.html` and
 assets. webxr-to-native is the runtime underneath:
 - **Script:** V8 runs it.
@@ -140,7 +131,7 @@ You need:
 - A Quest in developer mode, connected over USB.
 
 ```sh
-git clone https://github.com/sherbondy/webxr-to-native.git && cd webxr-to-native
+git clone https://github.com/Srile/webxr-to-native.git && cd webxr-to-native
 npm ci                     # esbuild and IWER
 ./tools/setup.sh           # JDK, Android SDK + NDK r27, V8, OpenXR loader, Oboe, stb, dr_mp3, libopus, libwebp, nanosvg
 source tools/env.sh        # puts the repo-local adb, NDK and JDK on PATH
@@ -293,8 +284,6 @@ leaves one off carries none of its native code or permissions, and its page does
 | `xr.controllerProfiles` | Touch's | the WebXR input profiles the page sees for the controllers, most specific first |
 | `xr.renderModels` | `false` | the runtime's own controller models (`XR_EXT_render_model`) as `XRFrame.getRenderModel(inputSource)` |
 | `xr.srgbSwapchain` | `false` | an sRGB swapchain with alpha, drawn through RGBA8 texture views (runtimes with no RGBA8 swapchain and GL without `EXT_sRGB_write_control`) |
-| `audio.elements` | `false` | `<audio>` / `new Audio()` play through the Web Audio graph (fetched and decoded whole) |
-| `steam.appId`, `steam.lib` | | Steamworks (`__native.steam`, host/steam/steam_bind.cpp): the app id and the Steamworks SDK's Android `libsteam_api.so`, packed into the APK and opened at runtime against the device's Steam client (the Steam Frame's Android container provides `libsteamclient.so`) |
 | `xr.clearFrame` | `false` | clear an `XRWebGLLayer` before each frame, as a browser does (one queued GL op); for engines that do not clear it themselves, like Wonderland |
 | `xr.perf` | | CPU/GPU performance levels (`XR_EXT_performance_settings`): `{ enabled, start, adaptive, … }` |
 | `gl.thread` | `true` (Quest) | run the page's GL calls on a GL thread; `adb shell setprop debug.webxr.glthread 0` overrides it |
@@ -304,10 +293,12 @@ leaves one off carries none of its native code or permissions, and its page does
 | `gl.multiDrawIndirect` | `true` | `WEBGL_multi_draw` as one indirect draw per call where the driver can |
 | `gl.withholdExtensions` | `[]` | WebGL extension names to hide from the page |
 | `gc.*` | | when V8 collects garbage: `enabled`, `semiSpaceMB` (16), `minorAfterSubmit` (0.25), `idle`, `idleMarginMs`, `flags` |
+| `audio.elements` | `false` | `<audio>` / `new Audio()` play through the Web Audio graph (fetched and decoded whole) |
 | `audio.maxNodes` | `512` | the audio graph's node limit |
 | `android.formFactor` | `quest` | `phone` builds a phone APK: no OpenXR, a phone manifest, touch input |
 | `android.frameRate` | `60` | phones: the page's frame rate on a 90/120 Hz display |
 | `touchControls` | | phones: sticks and buttons drawn over the frame and handed to the page as a standard gamepad (`host/gl/touch_controls.h` has the layout); `showWhen` shows them only while one of the page's elements is visible, `zones` route touches to the page's own touch elements |
+| `steam.appId`, `steam.lib` | | Steamworks (`__native.steam`, host/steam/steam_bind.cpp): the app id and the Steamworks SDK's Android `libsteam_api.so`, packed into the APK and opened at runtime against the device's Steam client (the Steam Frame's Android container provides `libsteamclient.so`) |
 | `debug.inspector`, `debug.port` | `true`, `9229` | the V8 inspector and the debug bridge (off in release builds) |
 | `debug.workers` | `false` | log every worker message |
 | `mode` | `js` | `native-clear`: no page at all, only a cleared stereo frame (a bring-up test) |
