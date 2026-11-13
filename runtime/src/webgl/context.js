@@ -24,6 +24,8 @@ import { rewriteDrawId, drawIdMode, std140Blocks, DRAW_ID_UNIFORM, DRAW_ID_ATTRI
 import { MultiDrawIndirect, DRAW_ID_LOC_ATTRIB } from './multidraw.js'
 import { usage } from './switch.js'
 
+// Object names fetched per round trip to the GL thread (_pooledName).
+const NAME_BATCH = 64
 // GL_FRAMEBUFFER_SRGB_EXT (EXT_sRGB_write_control) as last set: one GL context under every WebGL one, on by default.
 const GL_FRAMEBUFFER_SRGB_EXT = 0x8DB9
 let srgbOn = true
@@ -389,6 +391,23 @@ export class WebGL2RenderingContext {
     N.bindBufferRange(target, index, buffer ? buffer._name : 0, +offset, +size)
   }
 
+  // ---- object names: handed out from a per-context pool -----------------------------------
+  // Each create* would be its own round trip to the GL thread, which waits there for the queued frame; a scene
+  // being built makes hundreds. Names come in batches instead (genNames, one round trip each), made while this
+  // context is current. Like any glGen* name, one only names an object once it is first bound.
+  _pooledName(kind) {
+    if (!N.genNames) return 0
+    const pools = this._namePools || (this._namePools = {})
+    let pool = pools[kind]
+    if (!pool || pool.next >= pool.names.length) pool = pools[kind] = { names: N.genNames(kind, NAME_BATCH), next: 0 }
+    return pool.names[pool.next++] || 0
+  }
+  createBuffer() { this._ensureCurrent(); return this._create('buffer', this._pooledName('buffer') || N.createBuffer()) }
+  createTexture() { this._ensureCurrent(); return this._create('texture', this._pooledName('texture') || N.createTexture()) }
+  createVertexArray() { this._ensureCurrent(); return this._create('vao', this._pooledName('vao') || N.createVertexArray()) }
+  createFramebuffer() { this._ensureCurrent(); return this._create('framebuffer', this._pooledName('framebuffer') || N.createFramebuffer()) }
+  createRenderbuffer() { this._ensureCurrent(); return this._create('renderbuffer', this._pooledName('renderbuffer') || N.createRenderbuffer()) }
+
   // ---- bookkeeping used by the generated methods ----------------------------------------
   _create(kind, name) {
     if (!name) return null
@@ -598,10 +617,23 @@ export class WebGL2RenderingContext {
   getShaderInfoLog(shader) { this._ensureCurrent(); return N.getShaderInfoLog(shader ? shader._name : 0) }
   getProgramInfoLog(program) { this._ensureCurrent(); return N.getProgramInfoLog(program ? program._name : 0) }
   getShaderSource(shader) { return shader ? shader._source : null }
+  // A program's uniform locations are read together on its first lookup after a link (one round trip to the GL
+  // thread, not one per name: a page asks for every name in turn), then answered from here. A name GL doesn't list
+  // as active is null, as getUniformLocation's own answer for it would be.
   getUniformLocation(program, name) {
     this._ensureCurrent()
     if (!program) return null
-    const loc = N.getUniformLocation(program._name, String(name))
+    let loc
+    if (N.getUniformLocations) {
+      let locs = program._uniformLocs
+      if (!locs) {
+        locs = program._uniformLocs = new Map()
+        const flat = N.getUniformLocations(program._name)
+        for (let i = 0; i + 1 < flat.length; i += 2) locs.set(flat[i], flat[i + 1])
+      }
+      loc = locs.get(String(name))
+      if (loc === undefined) loc = -1
+    } else loc = N.getUniformLocation(program._name, String(name))
     return loc < 0 ? null : new WebGLUniformLocation(loc, program)
   }
   getUniform(program, location) {
@@ -654,6 +686,7 @@ export class WebGL2RenderingContext {
     let uniform = false, attr = false
     for (const s of program._shaders) if (s._usesDrawId) { if (s._drawIdAttr) attr = true; else uniform = true }
     if (attr) N.bindAttribLocation(program._name, this._mdi.attrib, DRAW_ID_ATTRIB)
+    program._uniformLocs = null  // read again on the next lookup: a link assigns new locations
     N.linkProgram(program._name)
     if (attr && !N.getProgramParameter(program._name, GL.LINK_STATUS)) {
       // The hidden attribute costs the program a location: one that needs every location the GPU has (uikit's
