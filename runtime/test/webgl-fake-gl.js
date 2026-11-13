@@ -35,6 +35,8 @@ export function fakeGL(opts = {}) {
   }
   // opts.drawIdAttrib: the reserved draw-id attribute location the native side reports (indirect multi-draw on).
   if (opts.drawIdAttrib !== undefined) gl.multiDrawInfo = () => opts.drawIdAttrib
+  // opts.namePools: the native batch of object names, as the host offers it.
+  if (opts.namePools) gl.genNames = (kind, n) => { calls.push(['genNames', kind, n]); return Array.from({ length: n }, () => nextName++) }
   if (opts.batchUniforms) gl.getUniformLocations = program => { calls.push(['getUniformLocations', program]); return Object.entries(answers.uniformLocations).flat() }
   // Every other entry point: record and return a fresh name for create*, 0 otherwise.
   const names = [

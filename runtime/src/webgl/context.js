@@ -24,6 +24,8 @@ import { rewriteDrawId, drawIdMode, std140Blocks, DRAW_ID_UNIFORM, DRAW_ID_ATTRI
 import { MultiDrawIndirect, DRAW_ID_LOC_ATTRIB } from './multidraw.js'
 import { usage } from './switch.js'
 
+// Object names fetched per round trip to the GL thread (_pooledName).
+const NAME_BATCH = 64
 // GL_FRAMEBUFFER_SRGB_EXT (EXT_sRGB_write_control) as last set: one GL context under every WebGL one, on by default.
 const GL_FRAMEBUFFER_SRGB_EXT = 0x8DB9
 let srgbOn = true
@@ -388,6 +390,23 @@ export class WebGL2RenderingContext {
     if (target === GL.UNIFORM_BUFFER && index >= usage.ubos && index < 24) usage.ubos = index + 1
     N.bindBufferRange(target, index, buffer ? buffer._name : 0, +offset, +size)
   }
+
+  // ---- object names: handed out from a per-context pool -----------------------------------
+  // Each create* would be its own round trip to the GL thread, which waits there for the queued frame; a scene
+  // being built makes hundreds. Names come in batches instead (genNames, one round trip each), made while this
+  // context is current. Like any glGen* name, one only names an object once it is first bound.
+  _pooledName(kind) {
+    if (!N.genNames) return 0
+    const pools = this._namePools || (this._namePools = {})
+    let pool = pools[kind]
+    if (!pool || pool.next >= pool.names.length) pool = pools[kind] = { names: N.genNames(kind, NAME_BATCH), next: 0 }
+    return pool.names[pool.next++] || 0
+  }
+  createBuffer() { this._ensureCurrent(); return this._create('buffer', this._pooledName('buffer') || N.createBuffer()) }
+  createTexture() { this._ensureCurrent(); return this._create('texture', this._pooledName('texture') || N.createTexture()) }
+  createVertexArray() { this._ensureCurrent(); return this._create('vao', this._pooledName('vao') || N.createVertexArray()) }
+  createFramebuffer() { this._ensureCurrent(); return this._create('framebuffer', this._pooledName('framebuffer') || N.createFramebuffer()) }
+  createRenderbuffer() { this._ensureCurrent(); return this._create('renderbuffer', this._pooledName('renderbuffer') || N.createRenderbuffer()) }
 
   // ---- bookkeeping used by the generated methods ----------------------------------------
   _create(kind, name) {

@@ -347,6 +347,27 @@ test('uniform locations are read once per link when the host batches them', () =
   assert.equal(ctx.getUniformLocation(null, 'uColor'), null)
 })
 
+test('object names come from a per-context pool, one round trip per batch', () => {
+  const { g, gl, ctx } = host({ namePools: true })
+  const buffers = Array.from({ length: 70 }, () => ctx.createBuffer())
+  assert.ok(buffers.every(b => b instanceof g.WebGLBuffer && b._name > 0))
+  assert.equal(new Set(buffers.map(b => b._name)).size, 70, 'every name is fresh')
+  assert.equal(count(gl, 'genNames'), 2, '70 buffers: two batches of 64')
+  assert.equal(count(gl, 'createBuffer'), 0, 'no per-object round trips')
+  const t = ctx.createTexture(), v = ctx.createVertexArray(), f = ctx.createFramebuffer(), r = ctx.createRenderbuffer()
+  assert.ok(t instanceof g.WebGLTexture && v instanceof g.WebGLVertexArrayObject && f instanceof g.WebGLFramebuffer && r instanceof g.WebGLRenderbuffer)
+  assert.deepEqual(gl.calls.filter(c => c[0] === 'genNames').map(c => c[1]), ['buffer', 'buffer', 'texture', 'vao', 'framebuffer', 'renderbuffer'])
+  const name = buffers[3]._name
+  ctx.deleteBuffer(buffers[3])
+  assert.deepEqual(last(gl, 'deleteBuffer'), ['deleteBuffer', name], 'a pooled name is deleted as any other')
+})
+
+test('without the native batch, create* asks for each name', () => {
+  const { gl, ctx } = host()
+  ctx.createBuffer(); ctx.createTexture()
+  assert.equal(count(gl, 'createBuffer'), 1); assert.equal(count(gl, 'createTexture'), 1)
+})
+
 test('every three r181 entry point exists on the context', () => {
   const { ctx } = host()
   const needed = ('activeTexture attachShader bindAttribLocation bindBuffer bindBufferBase bindFramebuffer bindRenderbuffer bindTexture bindVertexArray blendColor blendEquation ' +

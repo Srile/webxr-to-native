@@ -560,6 +560,28 @@ void f_getUniformLocation(const Args& a) {
   v8::String::Utf8Value s(iso, a[1]);
   wgl::retI(a, glGetUniformLocation(program, *s ? *s : ""));
 }
+// genNames(kind, count): `count` fresh names of one kind of object ("buffer", "texture", "vao", "framebuffer",
+// "renderbuffer") in one round trip to the GL thread. The context hands them out one per create* call, so making an
+// object needs no round trip of its own (an engine building a scene makes hundreds; each sync stalled the frame). A
+// name only names an object once it is first bound, as any glGen* name.
+void f_genNames(const Args& a) {
+  v8::Isolate* iso = a.GetIsolate();
+  if (a.Length() < 2) { wgl::typeError(iso, "WebGL: genNames needs a kind and a count"); return; }
+  v8::String::Utf8Value k(iso, a[0]);
+  const std::string kind = *k ? *k : "";
+  ARG_U32(1, count);
+  if (count > 256) count = 256;
+  std::vector<GLuint> names(count, 0);
+  auto gen = [&] {
+    if (kind == "buffer") glGenBuffers((GLsizei)count, names.data());
+    else if (kind == "texture") glGenTextures((GLsizei)count, names.data());
+    else if (kind == "vao") glGenVertexArrays((GLsizei)count, names.data());
+    else if (kind == "framebuffer") glGenFramebuffers((GLsizei)count, names.data());
+    else if (kind == "renderbuffer") glGenRenderbuffers((GLsizei)count, names.data());
+  };
+  if (glq::active() && !glq::onGLThread()) glq::sync("genNames", gen); else gen();
+  a.GetReturnValue().Set(uintArray(iso, names.data(), (GLsizei)count));
+}
 // getUniformLocations(program): every active uniform's name and location, read together in one round trip to the GL
 // thread (a page asks for each name in turn after a link; one sync each stalled its frame while the GL thread drained
 // the frame before). An array is also listed bare and by each element ("u[0]" → "u", "u[1]", …), as
@@ -1110,7 +1132,7 @@ void installWebGL(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Host
     {"readPixels", f_readPixels}, {"shaderSource", f_shaderSource}, {"getShaderInfoLog", f_getShaderInfoLog},
     {"getProgramInfoLog", f_getProgramInfoLog}, {"getShaderPrecisionFormat", f_getShaderPrecisionFormat},
     {"getActiveUniform", f_getActiveUniform}, {"getActiveAttrib", f_getActiveAttrib}, {"getAttachedShaders", f_getAttachedShaders},
-    {"getUniformLocation", f_getUniformLocation}, {"getUniformLocations", f_getUniformLocations}, {"getUniform", f_getUniform}, {"getUniformIndices", f_getUniformIndices},
+    {"getUniformLocation", f_getUniformLocation}, {"getUniformLocations", f_getUniformLocations}, {"genNames", f_genNames}, {"getUniform", f_getUniform}, {"getUniformIndices", f_getUniformIndices},
     {"getActiveUniforms", f_getActiveUniforms}, {"getActiveUniformBlockParameter", f_getActiveUniformBlockParameter},
     {"getActiveUniformBlockName", f_getActiveUniformBlockName}, {"getTransformFeedbackVarying", f_getTransformFeedbackVarying},
     {"transformFeedbackVaryings", f_transformFeedbackVaryings}, {"getTexParameter", f_getTexParameter},
