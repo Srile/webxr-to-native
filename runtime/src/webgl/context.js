@@ -598,10 +598,23 @@ export class WebGL2RenderingContext {
   getShaderInfoLog(shader) { this._ensureCurrent(); return N.getShaderInfoLog(shader ? shader._name : 0) }
   getProgramInfoLog(program) { this._ensureCurrent(); return N.getProgramInfoLog(program ? program._name : 0) }
   getShaderSource(shader) { return shader ? shader._source : null }
+  // A program's uniform locations are read together on its first lookup after a link (one round trip to the GL
+  // thread, not one per name: a page asks for every name in turn), then answered from here. A name GL doesn't list
+  // as active is null, as getUniformLocation's own answer for it would be.
   getUniformLocation(program, name) {
     this._ensureCurrent()
     if (!program) return null
-    const loc = N.getUniformLocation(program._name, String(name))
+    let loc
+    if (N.getUniformLocations) {
+      let locs = program._uniformLocs
+      if (!locs) {
+        locs = program._uniformLocs = new Map()
+        const flat = N.getUniformLocations(program._name)
+        for (let i = 0; i + 1 < flat.length; i += 2) locs.set(flat[i], flat[i + 1])
+      }
+      loc = locs.get(String(name))
+      if (loc === undefined) loc = -1
+    } else loc = N.getUniformLocation(program._name, String(name))
     return loc < 0 ? null : new WebGLUniformLocation(loc, program)
   }
   getUniform(program, location) {
@@ -654,6 +667,7 @@ export class WebGL2RenderingContext {
     let uniform = false, attr = false
     for (const s of program._shaders) if (s._usesDrawId) { if (s._drawIdAttr) attr = true; else uniform = true }
     if (attr) N.bindAttribLocation(program._name, this._mdi.attrib, DRAW_ID_ATTRIB)
+    program._uniformLocs = null  // read again on the next lookup: a link assigns new locations
     N.linkProgram(program._name)
     if (attr && !N.getProgramParameter(program._name, GL.LINK_STATUS)) {
       // The hidden attribute costs the program a location: one that needs every location the GPU has (uikit's

@@ -15,6 +15,7 @@ export function fakeGL(opts = {}) {
     getString(name) { calls.push(['getString', name]); return name === 0x1F00 ? 'FakeVendor' : name === 0x1F01 ? 'FakeRenderer' : name === 0x1F02 ? version : null },
     getParameter(pname) { calls.push(['getParameter', pname]); return pname in answers.params ? answers.params[pname] : 0 },
     getUniformLocation(program, name) { calls.push(['getUniformLocation', program, name]); return name in answers.uniformLocations ? answers.uniformLocations[name] : -1 },
+    // opts.batchUniforms: the native batch read (every active uniform at once), as the host offers it.
     getProgramParameter(p, pname) { calls.push(['getProgramParameter', p, pname]); return pname in answers.programParams ? answers.programParams[pname] : 0 },
     getShaderParameter(s, pname) { calls.push(['getShaderParameter', s, pname]); return pname in answers.shaderParams ? answers.shaderParams[pname] : 0 },
     getShaderPrecisionFormat(st, pt) { calls.push(['getShaderPrecisionFormat', st, pt]); return { rangeMin: 127, rangeMax: 127, precision: 23 } },
@@ -34,6 +35,7 @@ export function fakeGL(opts = {}) {
   }
   // opts.drawIdAttrib: the reserved draw-id attribute location the native side reports (indirect multi-draw on).
   if (opts.drawIdAttrib !== undefined) gl.multiDrawInfo = () => opts.drawIdAttrib
+  if (opts.batchUniforms) gl.getUniformLocations = program => { calls.push(['getUniformLocations', program]); return Object.entries(answers.uniformLocations).flat() }
   // Every other entry point: record and return a fresh name for create*, 0 otherwise.
   const names = [
     'activeTexture', 'attachShader', 'bindAttribLocation', 'bindBuffer', 'bindFramebuffer', 'bindRenderbuffer', 'bindTexture', 'blendColor', 'blendEquation',

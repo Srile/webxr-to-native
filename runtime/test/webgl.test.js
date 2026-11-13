@@ -329,6 +329,24 @@ test('__hostWrapTexture hands WebXR a real WebGLTexture for a swapchain name', (
   assert.equal(ctx.getParameter(ctx.TEXTURE_BINDING_2D_ARRAY), t)
 })
 
+test('uniform locations are read once per link when the host batches them', () => {
+  const { g, gl, ctx } = host({ batchUniforms: true, answers: { uniformLocations: { uColor: 3, 'uBones[0]': 5, uBones: 5, 'uBones[1]': 6, uBlockMember: -1 } } })
+  const prog = ctx.createProgram()
+  ctx.linkProgram(prog)
+  const a = ctx.getUniformLocation(prog, 'uColor')
+  assert.ok(a instanceof g.WebGLUniformLocation); assert.equal(a._loc, 3)
+  assert.equal(ctx.getUniformLocation(prog, 'uBones')._loc, 5)
+  assert.equal(ctx.getUniformLocation(prog, 'uBones[1]')._loc, 6)
+  assert.equal(ctx.getUniformLocation(prog, 'missing'), null, 'a name GL does not list is null')
+  assert.equal(ctx.getUniformLocation(prog, 'uBlockMember'), null, 'a block member has no location')
+  assert.equal(count(gl, 'getUniformLocations'), 1, 'one batch read for every name')
+  assert.equal(count(gl, 'getUniformLocation'), 0, 'no per-name round trips')
+  ctx.linkProgram(prog)
+  ctx.getUniformLocation(prog, 'uColor')
+  assert.equal(count(gl, 'getUniformLocations'), 2, 'a new link reads them again')
+  assert.equal(ctx.getUniformLocation(null, 'uColor'), null)
+})
+
 test('every three r181 entry point exists on the context', () => {
   const { ctx } = host()
   const needed = ('activeTexture attachShader bindAttribLocation bindBuffer bindBufferBase bindFramebuffer bindRenderbuffer bindTexture bindVertexArray blendColor blendEquation ' +

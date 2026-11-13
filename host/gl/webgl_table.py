@@ -546,6 +546,7 @@ HAND_NATIVES = [
     ('getActiveAttrib', '(program, index): {size, type, name}|null'),
     ('getAttachedShaders', '(program): number[] (shader names)'),
     ('getUniformLocation', '(program, name): number (-1 = none)'),
+    ('getUniformLocations', '(program): [name, location, ...] (every active uniform in one GL-thread round trip; arrays bare and by element)'),
     ('getUniform', '(program, location): number|boolean|Float32Array|Int32Array|Uint32Array|boolean[]|null'),
     ('getUniformIndices', '(program, names: string[]): number[]'),
     ('getActiveUniforms', '(program, indices: number[], pname): number[]|boolean[]'),
