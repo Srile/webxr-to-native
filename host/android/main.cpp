@@ -48,5 +48,9 @@ void android_main(android_app* app) {
     if (!st.h->tick()) { HOST_LOGI("host loop ended; finishing activity"); ANativeActivity_finish(app->activity); st.fatal = true; }
   }
   st.h.reset();
-  HOST_LOGI("android_main exit");
+  // The process ends with its activity, as the phone host's does (android/phone_host.cpp): V8 cannot start again in
+  // it (above), so a kept process only lingers. Android keeps a finished activity's process cached, where its audio
+  // streams went on playing the page's sound and the launcher still counted the app as running.
+  HOST_LOGI("android_main exit; the process ends with its activity");
+  _exit(0);
 }

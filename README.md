@@ -1,6 +1,6 @@
 # webxr-to-native
 
-Run an unmodified WebXR web game as a native app on Meta Quest, without a browser.
+Run an unmodified WebXR web game as a native app on Meta Quest and the Steam Frame, without a browser.
 
 The game stays a web app: a three.js / IWSDK, Wonderland Engine or plain WebGL 2 build with its `index.html` and
 assets. webxr-to-native is the runtime underneath:
@@ -11,19 +11,20 @@ assets. webxr-to-native is the runtime underneath:
 - **Audio:** WebAudio is a native audio graph.
 - **The rest:** fetch reads the bundled assets and the network.
 
-The result is an ordinary native APK, release-signed for the Meta Horizon Store. It has no WebView, no browser
+The result is an ordinary native APK, release-signed for the Meta Horizon Store or a Steam depot. It has no WebView, no browser
 chrome and no browser cost per frame. A WebGL-heavy page often spends less time per frame than it does in Quest
 Browser, because the GL calls go straight to the driver (on a GL thread of their own by default).
 
 The same runtime runs the game on Android phones (flat, with touch controls drawn as a gamepad), and in an
 emulated headset on macOS, Windows, Linux, iOS and the Apple Vision Pro simulator. Those hosts are for
-development and experiments; the Quest is the main target.
+development and experiments; the Quest is the main target, and the Steam Frame runs this toolkit's APKs too.
 
 ## Status
 
 | Host | State |
 |---|---|
 | Meta Quest (`host/android`, OpenXR) | the main target: three.js/IWSDK and Wonderland Engine games on Quest 2 and Quest 3, at the headset's refresh rate (72 to 120 Hz), multiview, controllers and hands; passthrough AR and plane/mesh detection are built but less tested |
+| Steam Frame (`host/android` in Valve's Lepton, on SteamVR's OpenXR) | working: immersive games at up to 90 Hz with multiview, controllers (drawn from SteamVR's own models), passthrough, `local-floor`, WebRTC voice, and Steamworks (account, ownership, friends, lobbies and invitations, rich presence) when Steam launches the APK; hand tracking is reported but less tested; no refresh-rate or foveation control. See [Steam Frame](#steam-frame) |
 | Android phones (`android.formFactor: "phone"`) | in progress: flat games with on-screen touch controls run on a Pixel 7 Pro, WebSocket and WebRTC data channels when a game asks for them |
 | macOS (`host/mac`) | experimental: the game in a window with an emulated headset (mouse aims, right-drag looks, WASD walks); can package a self-contained `.app` |
 | Windows (`host/win`) | experimental: the same window host on ANGLE/Direct3D 11; builds natively or cross-compiles from a Mac |
@@ -44,16 +45,25 @@ development and experiments; the Quest is the main target.
     clear of the drawing buffer.
   - On the Quest the GL calls are recorded into a ring and run on a GL thread, as a browser's GPU process does.
 - **WebXR** through [IWER](https://github.com/meta-quest/immersive-web-emulation-runtime) 2.8 in host mode:
-  - **Sessions:** `immersive-vr`, and `immersive-ar` with passthrough. `offerSession` is supported.
-  - **Spaces:** `local`, `local-floor` and `bounded-floor` reference spaces.
+  - **Sessions:** `immersive-vr`, and `immersive-ar` with passthrough (the passthrough layer extension, or the
+    runtime's alpha-blend environment mode where there is none, as on the Steam Frame). `offerSession` is supported.
+  - **Spaces:** `local`, `local-floor` and `bounded-floor` reference spaces; `xr.baseSpace: "local-floor"` makes
+    `XR_EXT_local_floor` the base space where the runtime has it.
   - **Layers:** projection layers (`XRWebGLBinding`, texture arrays for multiview), and `XRWebGLLayer` with 4x MSAA.
-  - **Input:** Touch controllers with gamepads and haptics, hand tracking with 25 joints, the hand's menu gesture.
+  - **Input:** Touch controllers with gamepads and haptics, hand tracking with 25 joints, the hand's menu gesture;
+    the input profile names the page sees are configurable (`xr.controllerProfiles`).
+  - **Controller models:** with `xr.renderModels`, the runtime's own (`XR_EXT_render_model`) as
+    `XRFrame.getRenderModel(inputSource)`, an addition, not a WebXR API: the model's glTF, its origin in the grip
+    space, and the poses of its animated nodes (trigger, thumbstick) every frame.
   - **Session control:** refresh rates, fixed foveation, visibility events.
   - **Scene:** plane and mesh detection, and room setup (`initiateRoomCapture`).
 - **WebAudio**:
   - A native graph, rendered on the audio thread: gain, buffer sources, oscillators, biquad, compressor, panner,
     listener, `OfflineAudioContext`.
-  - `decodeAudioData` takes WAV, Ogg Vorbis, Ogg Opus, WebM (Opus, Vorbis) and MP3.
+  - `decodeAudioData` takes WAV, Ogg Vorbis, Ogg Opus, WebM (Opus, Vorbis), MP3, and on Android AAC (MP4/M4A,
+    ADTS) through MediaCodec.
+  - `<audio>` and `new Audio()` (opt-in, `audio.elements`): played through the graph, fetched and decoded whole
+    (volume, `muted`, pause, `ended`); a `srcObject` stream plays live.
   - `AnalyserNode`, and, opt-in with `media.microphone`, the microphone: `getUserMedia({ audio })` (the headset's
     permission prompt, echo cancellation) into a `MediaStreamAudioSourceNode`.
 - **Network and storage**:
@@ -62,27 +72,34 @@ development and experiments; the Quest is the main target.
   - Opt-in per game:
     - WebSocket and WebRTC data channels; with `media.microphone` too, WebRTC audio tracks (`addTrack`,
       `addTransceiver`, `ontrack`): Opus over SRTP, the microphone sent, each peer's audio a track that
-      `createMediaStreamSource` plays. Interoperates with Chrome and Quest Browser peers. Incoming voice is read behind a
-      jitter margin that follows the network (60 to 240 ms), lost packets come back from Opus's in-band FEC, and
-      the log says every 5 s how each voice arrived.
+      `createMediaStreamSource` and `<audio srcObject>` play. Interoperates with Chrome and Quest Browser peers.
+      Incoming voice is read behind a jitter margin that follows the network (60 to 240 ms), lost packets come back
+      from Opus's in-band FEC, and the log says every 5 s how each voice arrived. Voice can join a call that began
+      with data channels, and a data channel a voice call (`apps/hello-voice` checks both).
     - IndexedDB and the Cache API, on SQLite, kept across launches, in the page and in workers.
     - Service workers. A registered worker answers the page's loads as `FetchEvent`s, and controls the page from
       the start of the next launch.
 - **Images**: `createImageBitmap`, `<img>`, PNG, JPEG and WebP decoding off the main thread, and a Canvas 2D
-  subset (paths, `Path2D`, clipping, compositing, drawing images: enough for UI atlases). Opt-in: text drawing
-  with `FontFace` fonts (`web.canvasText`) and SVG images (`web.svg`).
+  subset for UI: paths and `Path2D` (from SVG path data too, every command), anti-aliased fills, strokes with
+  dashes, `roundRect`, `arcTo`, transforms with rotation, clipping, compositing, drawing images. Opt-in: text
+  drawing with `FontFace` fonts (`web.canvasText`), falling back to the platform's symbol, CJK and colour emoji
+  fonts, with synthetic bold for weights a face lacks and rasterised text kept between draws; and SVG images
+  (`web.svg`).
 - **The page**:
   - A light DOM: `document`, the elements `index.html` declares, events, pointer and keyboard input outside XR.
   - `index.html`'s classic inline scripts, run before the entry as in a browser (opt-in: `web.inlineScripts`).
   - `navigator.userAgent` reads like Quest Browser's (Chrome for Android's in a phone build).
   - `navigator.horizon` exposes the Meta Platform SDK (entitlement, user, leaderboards, achievements) when the
     app bundles it.
+  - Steamworks, with `steam.appId`: `__native.steam` (the account, Web API tickets, ownership, friends, lobbies and
+    invitations, rich presence, join requests), for the game's own bridge to build on; not a web API.
+  - `window.close()` ends the app.
 
 What it does not do:
 - The page's HTML and CSS are never laid out or drawn: there is no layout engine. Menus have to be in the 3D
   scene. Where a page's HTML UI would make a choice (a "VR" button, a privacy prompt), a short boot script can
   make it: `web.inject` below.
-- No `<video>` or `<audio>` playback, no camera, no WebGPU.
+- No `<video>` playback (`<audio>` with `audio.elements`), no camera, no WebGPU.
 
 ## How it works
 
@@ -164,6 +181,68 @@ never as arguments. The inspector is off in a release build, and the runtime shi
 map (0.7 MB instead of 2.6). Uploading to a store is up to the game (Meta's `ovr-platform-util` takes the APK as it
 is).
 
+## Steam Frame
+
+The Frame runs Android apps in Lepton, Valve's Android 11 container on SteamOS, so an APK from this toolkit runs
+there too, on SteamVR's OpenXR runtime (2.19.2 when this was written): GLES 3.2 through Mesa (Zink on Turnip,
+Adreno 750), `XR_KHR_opengl_es_enable`, multiview, controllers, hand tracking, `XR_EXT_local_floor`, the opaque
+and alpha-blend environment modes (alpha blend is its passthrough), and `XR_EXT_render_model`. It renders at
+90 Hz; the refresh-rate and foveation calls fail harmlessly, and its swapchains are sRGB only. A host.json for it:
+
+```json
+"xr": {
+  "autoEnter": true, "preferredRate": 90, "baseSpace": "local-floor",
+  "controllerProfiles": ["valve-frame-controller", "generic-trigger-squeeze-thumbstick"],
+  "renderModels": true, "srgbSwapchain": true
+}
+```
+
+- `srgbSwapchain`: SteamVR offers no RGBA8 swapchain and the Frame's GL has no `EXT_sRGB_write_control`, so a
+  page's already-encoded colours were encoded again (everything pale) and the first format offered had no alpha
+  (passthrough blended wrongly). With it the page draws into RGBA8 views of `SRGB8_ALPHA8` images.
+- `controllerProfiles`: SteamVR binds the Frame's controllers to the Touch profile the host asks for; these
+  names let the page pick its mapping and models for them.
+- `renderModels`: the controllers drawn from SteamVR's own models; nothing of Valve's is packed into the APK.
+- `immersive-ar` is passthrough through alpha blend: the page's transparent pixels show the room.
+
+### A development build
+
+1. Start "Lepton Development" from the Frame's Steam library: no Lepton container runs until something starts one.
+2. Reach its adb: with the Frame on USB, `adb -s <frame serial> forward tcp:5555 tcp:5555 && adb connect
+   localhost:5555`, or over the network as [Valve's page](https://partner.steamgames.com/doc/steamhardware/steamframe/adb_lepton)
+   describes.
+3. Pack with `--out` and install with your own adb: `adb -s localhost:5555 install -r -g app.apk`, then
+   `adb -s localhost:5555 shell am start -n <package>/android.app.NativeActivity`.
+
+Use your own adb throughout: `tools/device.mjs`, `--install`/`--run` and `bridge.mjs` use the repository's newer
+adb, which restarts the adb server and drops the forward. For the bridge, forward its port and point it here:
+`adb -s localhost:5555 forward tcp:9240 tcp:9240`, then `HOST_LOCAL=1 HOST_PORT=9240 node tools/bridge.mjs stats`.
+The session only becomes visible while the headset is worn.
+
+### Steamworks
+
+Set `steam.appId`, and point `steam.lib` at the Steamworks SDK's `redistributable_bin/androidarm64/libsteam_api.so`
+(not in this repository: copy it from your SDK). The APK carries it and opens it at runtime against the Steam client
+Lepton provides. Steam lets an app talk to it only as itself, and a development install runs inside Lepton
+Development, an app of its own (3056000): there `init` fails with "ConnectToGlobalUser failed" for your app id.
+Test Steam features from a Steam launch.
+
+### Shipping on Steam
+
+[Valve's guide](https://partner.steamgames.com/doc/steamhardware/steamframe/apk_upload), in short: an Android
+depot (SteamPipe › Depots, Operating System Android) with the release APK at its top level, a launch option with
+that APK as its Executable and Operating System Android, and the depot in the app's packages. Sign every update
+with the same key (`--release --keystore`): Android won't install an APK over one signed with another.
+
+- Steam launches the APK in a container of its own (`lepton-steamlaunch-<app id>`) and installs it from the depot
+  at each launch. The container's logcat is copied to `~/.local/share/Steam/logs/lepton-steamlaunch-<app id>.log`
+  on the Frame, and its adb answers on 5555 while it runs. `adb install -r` over the running app ends it, and
+  Lepton then stops the container; to try a build in a Steam launch, replace the APK in the game's install folder
+  instead (`steamapps/common/<game>/`) and launch again. Steam puts its own back at the next update.
+- When the app has Windows, macOS or Linux builds too, Steam on the Frame installs the Linux one (through FEX).
+  The player picks the Android build with the "Lepton" compatibility tool (the game's Properties › Compatibility);
+  when this was written no Steamworks setting chose it: Valve sets a Frame default per app.
+
 ## host.json
 
 Paths are relative to the `host.json`. Every key is optional except `app.package` for an APK and `web.dist` for a
@@ -182,6 +261,7 @@ leaves one off carries none of its native code or permissions, and its page does
 | `web.dist` | | the built web app |
 | `web.origin` | `https://app.local` | the page's `location.origin`; relative URLs resolve against it |
 | `web.query` | | appended to `location.search` |
+| `web.remote` | `[]` | same-origin path prefixes (`"/api/"`) fetched from `web.origin` over the network instead of the packed files |
 | `web.exclude` | | globs of files not to pack (`*.map`, …) |
 | `web.inject` | | the game's own boot scripts, imported before the entry: where the HTML UI would have made a choice |
 | `web.startGesture` | `false` | phones: treat launch as the first tap, for pages that wait for one before starting sound |
@@ -200,6 +280,10 @@ leaves one off carries none of its native code or permissions, and its page does
 | `xr.foveation` | the page's | fixed foveation 0..1, overriding what the page sets |
 | `xr.foveationDynamic` | `false` | let the runtime lower foveation when the GPU has headroom |
 | `xr.invalidate` | `true` | discard depth after each frame (saves bandwidth on tilers) |
+| `xr.baseSpace` | `stage` | `local-floor`: the base space is `XR_EXT_local_floor` where the runtime has it |
+| `xr.controllerProfiles` | Touch's | the WebXR input profiles the page sees for the controllers, most specific first |
+| `xr.renderModels` | `false` | the runtime's own controller models (`XR_EXT_render_model`) as `XRFrame.getRenderModel(inputSource)` |
+| `xr.srgbSwapchain` | `false` | an sRGB swapchain with alpha, drawn through RGBA8 texture views (runtimes with no RGBA8 swapchain and GL without `EXT_sRGB_write_control`) |
 | `xr.clearFrame` | `false` | clear an `XRWebGLLayer` before each frame, as a browser does (one queued GL op); for engines that do not clear it themselves, like Wonderland |
 | `xr.perf` | | CPU/GPU performance levels (`XR_EXT_performance_settings`): `{ enabled, start, adaptive, … }` |
 | `gl.thread` | `true` (Quest) | run the page's GL calls on a GL thread; `adb shell setprop debug.webxr.glthread 0` overrides it |
@@ -209,10 +293,12 @@ leaves one off carries none of its native code or permissions, and its page does
 | `gl.multiDrawIndirect` | `true` | `WEBGL_multi_draw` as one indirect draw per call where the driver can |
 | `gl.withholdExtensions` | `[]` | WebGL extension names to hide from the page |
 | `gc.*` | | when V8 collects garbage: `enabled`, `semiSpaceMB` (16), `minorAfterSubmit` (0.25), `idle`, `idleMarginMs`, `flags` |
+| `audio.elements` | `false` | `<audio>` / `new Audio()` play through the Web Audio graph (fetched and decoded whole) |
 | `audio.maxNodes` | `512` | the audio graph's node limit |
 | `android.formFactor` | `quest` | `phone` builds a phone APK: no OpenXR, a phone manifest, touch input |
 | `android.frameRate` | `60` | phones: the page's frame rate on a 90/120 Hz display |
 | `touchControls` | | phones: sticks and buttons drawn over the frame and handed to the page as a standard gamepad (`host/gl/touch_controls.h` has the layout); `showWhen` shows them only while one of the page's elements is visible, `zones` route touches to the page's own touch elements |
+| `steam.appId`, `steam.lib` | | Steamworks (`__native.steam`, host/steam/steam_bind.cpp): the app id and the Steamworks SDK's Android `libsteam_api.so`, packed into the APK and opened at runtime against the device's Steam client (the Steam Frame's Android container provides `libsteamclient.so`) |
 | `debug.inspector`, `debug.port` | `true`, `9229` | the V8 inspector and the debug bridge (off in release builds) |
 | `debug.workers` | `false` | log every worker message |
 | `mode` | `js` | `native-clear`: no page at all, only a cleared stereo frame (a bring-up test) |
@@ -230,6 +316,10 @@ node tools/bridge.mjs shot left.png --eye left   # the XR eye buffer as rendered
 node tools/device.mjs log                        # logcat: tag webxr-host, the page's console as js:
 node tools/profile.mjs 10                        # a 10 s CPU profile, summarised per function
 ```
+
+A frame that hitches: `node tools/bridge.mjs eval '__native.gl.debugSlowOps(8)'` makes the host log, from then on, every
+XR frame over 8 ms start to start in parts (the event loop's other work, the wait, the page's frame, the submit, the
+GC) and any single command the GL thread takes longer than that over; `0` turns it off.
 
 `HOST_LOCAL=1` points the bridge and profiler at a host on this machine (macOS, Windows, Linux, the iOS
 simulator). On the Quest a debug build accepts inspector connections from the local network, not only through
@@ -271,6 +361,7 @@ ANGLE slice, plus 10 to 17 GB of checkouts. Each archive carries the licences of
 ```sh
 npm run test:runtime                                   # the JS runtime against fake natives (node --test)
 cmake -S host -B build-tests -G Ninja -DHOST_TESTS=ON && ninja -C build-tests
+# no Ninja on PATH? the SDK's: -DCMAKE_MAKE_PROGRAM="$(ls tools/sdk/android/cmake/*/bin/ninja)"
 for t in json_test loop_test audio_test image_test gl_queue_test storage_test; do build-tests/$t; done
 node tools/test.mjs                                    # on a headset: every app in apps/ against its expected.png
 ```
@@ -284,13 +375,13 @@ costs (`tools/bench.mjs`).
 
 ```
 host/        the native host (C++20, CMake): app/ core/ gl/ js/ xr/ audio/ img/ net/ store/ platform/ rtc/
-             media/ (microphone) storage/ (IndexedDB, Cache API),
+             media/ (microphone) storage/ (IndexedDB, Cache API) steam/ (Steamworks),
              android/ the Quest and phone glue, emu/ the emulated headset of the desktop hosts, mac/ win/ linux/
              ios/ vision/, wamr/ the WebAssembly interpreter build, tests/ native unit tests
 runtime/     the browser surface in JavaScript (runtime/src) and its tests (runtime/test)
 android/     the Gradle shell that packs the native library, the runtime and the game into an APK
-apps/        test apps (hello-xr, hello-js, hello-rtc, hello-intl, hello-mic, hello-storage, hello-sw, gl-bench)
-             and the IWSDK benchmark scenes
+apps/        test apps (hello-xr, hello-js, hello-rtc, hello-voice, hello-intl, hello-mic, hello-storage, hello-sw,
+             gl-bench) and the IWSDK benchmark scenes
 tools/       setup scripts, the builders (pack, mac, win, linux, ios), device, bridge, profile, test, bench
 licenses/    the licence texts of the third-party software the apps contain
 third_party/ downloaded by the setup scripts (gitignored)

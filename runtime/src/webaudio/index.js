@@ -51,6 +51,8 @@
 // positionX..Z, forwardX..Z, upX..Z. Every node has one input (sources none)
 // and one output, so the output/input indices are validated here and 0 natively.
 
+import { installMediaElements } from './media-elements.js'
+
 const KINDS = { gain: 'gain', bufferSource: 'bufferSource', oscillator: 'oscillator', biquad: 'biquad', compressor: 'compressor', panner: 'panner', analyser: 'analyser' }
 const OSC_TYPES = ['sine', 'square', 'sawtooth', 'triangle']
 const FILTER_TYPES = ['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']
@@ -433,4 +435,5 @@ export function install(g) {
   })
   g.webkitAudioContext = AudioContext
   g.webkitMediaStream = MediaStream
+  if (g.__native?.config?.audio?.elements === true) installMediaElements(g, AudioContext)
 }

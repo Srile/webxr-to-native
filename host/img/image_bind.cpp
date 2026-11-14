@@ -9,7 +9,8 @@
 //   fontSystem(): id | -1                          — the platform's sans-serif face
 //   textMeasure(font, fallback, px, spacing, text, out: Float64Array(7))
 //     out = width, ink left, ink right, ink ascent, ink descent, font ascent, font descent (CSS px)
-//   textRaster(font, fallback, px, spacing, scaleX, scaleY, ox, oy, text, alpha: Uint8Array, out: Int32Array(4)): bool
+//   textRaster(font, fallback, px, spacing, scaleX, scaleY, ox, oy, text, alpha: Uint8Array, out: Int32Array(4 or 5), rgba?: Uint8Array): bool
+//     out[4]: the text has colour emoji, drawn into rgba (w * h * 4, straight alpha) rather than alpha
 //     coverage into alpha, out = w, h, x0, y0 (device px); false with out set when alpha is too small or nothing inks
 // decode takes SVG only with host.json web.svg in a build with HOST_HAS_SVG (nanosvg; CMake HOST_SVG).
 // Result buffers are handed to V8 by backing store, no copy.
@@ -183,11 +184,13 @@ void TextRaster(const v8::FunctionCallbackInfo<v8::Value>& a) {
   bind::Bytes alpha = a.Length() > 9 && a[9]->IsUint8Array() ? bind::bytes(a[9]) : bind::Bytes{};
   bind::Bytes out = a.Length() > 10 && a[10]->IsInt32Array() ? bind::bytes(a[10]) : bind::Bytes{};
   if (!alpha.ok || !out.ok || out.len < 4 * sizeof(int32_t)) { bind::throwType(iso, "img.textRaster: alpha must be a Uint8Array and out an Int32Array of 4"); return; }
-  int w = 0, h = 0, x0 = 0, y0 = 0;
+  bind::Bytes rgba = a.Length() > 11 && a[11]->IsUint8Array() ? bind::bytes(a[11]) : bind::Bytes{};
+  int w = 0, h = 0, x0 = 0, y0 = 0; bool color = false;
   bool ok = img::textRaster(bind::i32(a, 0, -1), bind::i32(a, 1, -1), (float)bind::num(a, 2), (float)bind::num(a, 3), (float)bind::num(a, 4, 1), (float)bind::num(a, 5, 1),
-                            (float)bind::num(a, 6), (float)bind::num(a, 7), g_text.data(), g_text.size(), alpha.data, alpha.len, w, h, x0, y0);
-  const int32_t v[4] = {w, h, x0, y0};
-  memcpy(out.data, v, sizeof v);
+                            (float)bind::num(a, 6), (float)bind::num(a, 7), g_text.data(), g_text.size(), alpha.data, alpha.len, w, h, x0, y0,
+                            rgba.ok ? rgba.data : nullptr, rgba.ok ? rgba.len : 0, color);
+  const int32_t v[5] = {w, h, x0, y0, color ? 1 : 0};
+  memcpy(out.data, v, out.len >= 5 * sizeof(int32_t) ? sizeof v : 4 * sizeof(int32_t));
   a.GetReturnValue().Set(ok);
 }
 #endif  // HOST_HAS_CANVAS_TEXT

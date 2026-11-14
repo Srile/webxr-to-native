@@ -58,7 +58,7 @@ constexpr uint32_t kPipeEndWords = (uint32_t)((sizeof(PipeEnd) + 3) / 4);
 Host::Host(android_app* app) : app_(app) {}
 Host::~Host() {
   if (inspector_) inspector_->stop();
-  if (jsUp_) { store_.flush(); shutdownWorkers(); http_.shutdown(); store_.flush(); gc_.detach(); modules_.reset(); engine_.destroy(); Engine::shutdownPlatform(); }  // the saves first: nothing after may hold them up
+  if (jsUp_) { store_.flush(); shutdownWorkers(); http_.shutdown(); store_.flush(); gc_.detach(); loop_.clear(); modules_.reset(); engine_.destroy(); Engine::shutdownPlatform(); }  // the saves first: nothing after may hold them up; the page's pending timers and tasks before the engine (they hold its handles)
   if (clearUp_) clear_.shutdown();
   glq::stop();  // the context back on this thread for the teardown below
   if (xrInstance_) xr_.destroy();
@@ -85,6 +85,7 @@ bool Host::start() {
 
 bool Host::startXrInstance() {
   if (xrInstance_) return true;
+  xr_.setRenderModels(config_.at("xr").bo("renderModels", false));
   if (!xr_.createInstance(app_)) return false;
   { const Json& x = config_.at("xr"); const Json& p = x.at("perf"); PerfConfig pc;
     std::string lvl = p.s("start", "sustained_high");
@@ -93,7 +94,8 @@ bool Host::startXrInstance() {
     pc.window = std::max(10, (int)p.n("window", 90)); pc.missRatio = (float)p.n("missRatio", 0.05); pc.stableWindows = std::max(1, (int)p.n("stableWindows", 5));
     xr_.setPerfConfig(pc);
     xr_.setFoveationDynamic(x.bo("foveationDynamic", false));
-    invalidateAcquire_ = x.bo("invalidate", true); }
+    invalidateAcquire_ = x.bo("invalidate", true);
+    xr_.setPreferLocalFloor(x.s("baseSpace", "stage") == "local-floor"); }
   if (!glq::sync("createSession", [&] { return xr_.createSession(egl_); })) return false;
   xrInstance_ = true; xrSession_ = true;
   // The frame's threads, for the runtime's scheduler (XR_KHR_android_thread_settings; host.json xr.threadHints,
@@ -177,7 +179,7 @@ bool Host::startJs() {
 #ifdef HOST_HAS_MICROPHONE
     installMedia(ctx, native, svc_);  // host.json media.microphone (WP-25); before installAudio, which binds its tracks
 #endif
-    installWebGL(ctx, native, svc_); installImages(ctx, native, svc_); installAudio(ctx, native, svc_); installXr(ctx, native, svc_); installWorkers(ctx, native, svc_); installPlatform(ctx, native, svc_); installRtc(ctx, native, svc_);
+    installWebGL(ctx, native, svc_); installImages(ctx, native, svc_); installAudio(ctx, native, svc_); installXr(ctx, native, svc_); installWorkers(ctx, native, svc_); installPlatform(ctx, native, svc_); installRtc(ctx, native, svc_); installSteam(ctx, native, svc_);
 #ifdef HOST_V8_INTL
     intl::install(ctx, native);
 #endif
@@ -208,6 +210,8 @@ bool Host::xrBegin(const Json& opts, Json& out) {
   // RGBA8 swapchain as linear, washed out (a projection layer's texture array it shows as sRGB), so such a layer gets
   // an sRGB one and the runtime turns GL's conversion on write off while the page draws into it (webxr/layers.js).
   if (opts.n("srgbLayer", 0) > 0.5 && d.arraySize == 1) d.glFormat = 0x8C43;  // GL_SRGB8_ALPHA8
+  // host.json xr.srgbSwapchain: an sRGB swapchain with alpha, drawn through RGBA8 views (SwapchainDesc::srgbView).
+  if (config_.at("xr").bo("srgbSwapchain", false)) { d.glFormat = 0x8C43; d.srgbView = true; }
   // Scene data is behind a runtime permission (Horizon OS v60+). The dialog's answer never reaches native code:
   // xrTick re-checks on the next FOCUSED and queries again.
   if (d.scene && !hasPermission(svc_.javaVm, svc_.activity, kScenePermission)) { scenePermissionAsked_ = true; requestPermission(svc_.javaVm, svc_.activity, kScenePermission); }
@@ -398,7 +402,7 @@ void Host::xrTickPipelined() {
   f.colorTexture = f.shouldRender && xr_.swapchainWidth() > 0 ? wgl::kXrImage : 0; f.imageIndex = 0;
   glq::put(kOpXrBegin, f.shouldRender ? 1u : 0u);
   gc_.setInFrame(true);
-  if (jsUp_) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.hasStage()); });
+  if (jsUp_) engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.baseIsFloor()); });
   const double t1 = loop_.now(); jsMs_ += t1 - t0;
   if (f.shouldRender && !shots_.empty()) captureShots(&g_glFrame);  // a sync: reads the GL thread's frame once it has run
   PipeEnd e{}; e.displayTime = f.displayTime; e.shouldRender = f.shouldRender;
@@ -446,15 +450,22 @@ void Host::xrTick() {
   gc_.setInFrame(true);  // pre-submit window: a GC pause from here to xrEndFrame's return delays the frame
   if (mode_ == "native-clear") { if (f.shouldRender) clear_.drawXr(f); }
   else if (jsUp_) {
-    engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.hasStage()); });
+    engine_.run([&](v8::Isolate* iso, v8::Local<v8::Context> ctx) { xrDispatchFrame(iso, ctx, f, xr_.baseIsFloor()); });
   }
   const double t1 = loop_.now(); jsMs_ += t1 - t0;
   if (f.shouldRender) captureShots(&f);
   // With the GL thread on, this waits for the frame's commands to run, then submits (end = the GL tail).
   glq::sync("endFrame", [&] { if (jsUp_) glBindFramebuffer(GL_FRAMEBUFFER, 0); xr_.endFrame(f, f.shouldRender); });
+  const double t2 = loop_.now();
   gc_.setInFrame(false);
   if (jsUp_) gc_.afterSubmit();  // the next frame starts with an emptied young generation when it was filling up
-  endMs_ += loop_.now() - t1;
+  const double t3 = loop_.now();
+  endMs_ += t3 - t1;
+  // Diagnostics (__native.gl.debugSlowOps): a frame that took longer than the threshold, start to start, in parts:
+  // the event loop's other work since the last frame, xrWaitFrame + begin, the page's frame, the submit, the GC.
+  if (const uint64_t slow = glq::slowLogUs(); slow && lastFrameStart_ > 0 && (tw - lastFrameStart_) * 1000 >= (double)slow)
+    HOST_LOGW("xr frame %.1f ms since the last: between %.1f, wait %.1f, js %.1f, end %.1f, gc %.1f ms", tw - lastFrameStart_, tw - lastFrameEnd_, t0 - tw, t1 - t0, t2 - t1, t3 - t2);
+  lastFrameStart_ = tw; lastFrameEnd_ = t3;
   stats(&f);
 }
 

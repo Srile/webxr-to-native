@@ -21,7 +21,7 @@ fetch() {  # fetch <url> <sha256> <dest dir> [strip]
 }
 
 LDC="$TP/libdatachannel"
-if [ ! -f "$LDC/.stamp-v0.24.6" ]; then
+if [ ! -f "$LDC/.stamp-v0.24.6-6" ]; then
   fetch https://github.com/paullouisageneau/libdatachannel/archive/refs/tags/v0.24.6.tar.gz \
     22a66aebebd8dae561d8e5181da96f2fcc203e067c5b2186c07b39af913464c0 "$LDC"
   fetch https://github.com/paullouisageneau/libjuice/archive/b89c792e3612faf2f12cf35bcc56857313a06be3.tar.gz \
@@ -34,7 +34,23 @@ if [ ! -f "$LDC/.stamp-v0.24.6" ]; then
   # With Mbed TLS, upstream never verifies a TLS server (wss signalling could be intercepted): verify against the
   # system's CAs, which the host names in RTC_CA_PATH (host/rtc/rtc_bind.cpp).
   (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-mbedtls-verify.patch")
-  touch "$LDC/.stamp-v0.24.6"
+  # Mbed TLS writes one record (16 KiB) per call: upstream sent only the first of a larger message (a WebSocket
+  # message over 16 KiB lost its tail, and the server read the next frames as the rest of it).
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-mbedtls-partial-write.patch")
+  # A track added with the mid of one that is gone (an audio m-line rolled back, then taken again by the peer's offer:
+  # glare between two hosts, whose mids are the same) was never found by its mid, and the answer rejected it.
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-track-mid-reuse.patch")
+  # A data channel added to a connected session by the peer's offer: SCTP started before the answer had its
+  # application line, threw, and failed the connection; it now starts with the answer.
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-sctp-mid-session.patch")
+  # SCTP starting on a connected session could take the peer's INIT before sending its own and wait, on the thread
+  # applying the description, for that send: the page's thread hung. Its own INIT goes first now.
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-sctp-start-order.patch")
+  # A build with audio forces the media transport on every connection (voice added to a data-only call needs it);
+  # a DTLS peer that negotiates no SRTP (RFC 8827 requires it of WebRTC endpoints, browsers and libdatachannel all
+  # offer it, but a bare DTLS/SCTP peer may not) then keeps its data channels instead of failing the handshake.
+  (cd "$LDC" && patch -s -p1 < "$ROOT/tools/patches/libdatachannel-0.24.6-srtp-optional.patch")
+  touch "$LDC/.stamp-v0.24.6-6"
 fi
 if [ ! -f "$TP/mbedtls/.stamp-3.6.7" ]; then
   fetch https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2 \

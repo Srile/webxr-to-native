@@ -82,6 +82,9 @@ void registerOp(uint32_t op, Handler h);
 
 // Runs fn(ctx) on the GL thread after everything already queued; returns once it has run.
 void runSync(void (*fn)(void*), void* ctx, const char* what);
+// Logs any one command the GL thread takes longer than this over (0: off; Android: debug.webxr.glslow ms at start).
+void setSlowLogUs(uint64_t us);
+uint64_t slowLogUs();
 template <class F> inline auto sync(const char* what, F&& f) -> decltype(f()) {
   if (!active() || t_onGL) return f();
   using R = decltype(f());

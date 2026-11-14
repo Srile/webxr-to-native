@@ -1,5 +1,9 @@
 // The GL thread and its command ring (gl_queue.h).
 #include "gl/gl_queue.h"
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+#include <cstdlib>
 #ifndef GLQ_NO_EGL
 #include "gl/egl.h"
 #endif
@@ -67,7 +71,19 @@ inline void cpuRelax() {
 }
 
 // A sync call parked in the ring: [kOpSync, ptr lo, ptr hi].
-struct SyncCall { void (*fn)(void*); void* ctx; std::atomic<uint32_t> state{0}; };  // 0 pending, 1 done, 2 waiter parked
+struct SyncCall { void (*fn)(void*); void* ctx; const char* name; std::atomic<uint32_t> state{0}; };  // 0 pending, 1 done, 2 waiter parked
+
+// Diagnostics: any one command the GL thread takes longer than this over is logged (0: off). Android:
+// `adb shell setprop debug.webxr.glslow <ms>` before launch. Generated opcodes are named in webgl_bind.gen.cpp.
+std::atomic<uint64_t> g_slowUs{0};
+inline void slowOp(uint32_t op, uint64_t start, const char* name) {
+  const uint64_t limit = g_slowUs.load(std::memory_order_relaxed);
+  if (!limit) return;
+  const uint64_t took = nowUs() - start;
+  if (took < limit) return;
+  if (name) HOST_LOGW("gl thread: sync %s took %.1f ms", name, took / 1000.0);
+  else HOST_LOGW("gl thread: op %u took %.1f ms", op, took / 1000.0);
+}
 
 // How long the consumer spins on an empty ring before it parks. Within a frame the page records in bursts with
 // short JS gaps between them; parking in every gap would pay a futex wake per burst.
@@ -79,6 +95,9 @@ void consume() {
   g_tid = (int)syscall(SYS_gettid);
 #endif
   if (!g_bind(g_ctx)) HOST_LOGE("gl thread: eglMakeCurrent failed");
+#ifdef __ANDROID__
+  { char v[PROP_VALUE_MAX] = {}; if (__system_property_get("debug.webxr.glslow", v) > 0 && atoi(v) > 0) { g_slowUs.store((uint64_t)atoi(v) * 1000); HOST_LOGI("gl thread: logging commands over %d ms (debug.webxr.glslow)", atoi(v)); } }
+#endif
   HOST_LOGI("gl thread: context current, ring %u KB", (unsigned)(g_bytes / 1024));
   uint32_t* d = g_mem + kBase;
   uint32_t r = ctrl(kR).load(std::memory_order_relaxed);
@@ -105,6 +124,7 @@ void consume() {
     uint32_t sinceRelease = 0;
     while (r != w) {
       const uint32_t op = d[r];
+      const uint64_t opStart = g_slowUs.load(std::memory_order_relaxed) ? nowUs() : 0;
       uint32_t n;
       if (op >= kFirstGenerated) n = g_generated(d + r);
       else if (op == kOpWrap) { r = 0; ctrl(kR).store(r, std::memory_order_release); continue; }
@@ -113,10 +133,12 @@ void consume() {
         SyncCall* c = (SyncCall*)(uintptr_t)p;
         r += 3; ctrl(kR).store(r, std::memory_order_release);
         c->fn(c->ctx);
+        slowOp(op, opStart, c->name);
         if (c->state.exchange(1, std::memory_order_acq_rel) == 2) futexWake(&c->state);
         continue;
       } else if (op >= kFirstHand && g_hand[op]) n = g_hand[op](d + r);
       else { HOST_LOGE("gl thread: bad opcode %u at %u (w %u); ring dropped", op, r, w); r = w; break; }
+      slowOp(op, opStart, nullptr);
       r += n; c_words.fetch_add(n, std::memory_order_relaxed);
       if ((sinceRelease += n) > 1024) { ctrl(kR).store(r, std::memory_order_release); sinceRelease = 0; }
     }
@@ -208,10 +230,13 @@ void registerOp(uint32_t op, Handler h) {
   else if (op == kFirstGenerated) g_generated = h;
 }
 
+void setSlowLogUs(uint64_t us) { g_slowUs.store(us, std::memory_order_relaxed); }
+uint64_t slowLogUs() { return g_slowUs.load(std::memory_order_relaxed); }
+
 void runSync(void (*fn)(void*), void* ctx, const char* what) {
   ++p_syncs;
   for (auto& s : g_names) { if (s.name == what) { ++s.n; break; } if (!s.name) { s.name = what; s.n = 1; break; } }
-  SyncCall c; c.fn = fn; c.ctx = ctx;
+  SyncCall c; c.fn = fn; c.ctx = ctx; c.name = what;
   const uint64_t p = (uint64_t)(uintptr_t)&c;
   put(kOpSync, (uint32_t)p, (uint32_t)(p >> 32));
   // Spin first: a sync behind a short queue completes in microseconds, a futex round trip costs more than that.

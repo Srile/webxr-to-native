@@ -27,6 +27,9 @@ class Loop {
   double nextDeadline() const;
   bool hasPendingTasks();
   size_t timerCount() const { return timers_.size(); }
+  // Loop-thread only. Drops every posted task and timer unrun. A host shutting down calls it before the JS engine
+  // goes: a page's pending callbacks hold handles into the engine, and releasing them after it is gone crashes.
+  void clear();
 
  private:
   struct Timer { uint32_t id; double due; double period; bool repeat; Task fn; bool dead; };
