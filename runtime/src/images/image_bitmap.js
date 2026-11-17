@@ -1,7 +1,8 @@
 // ImageBitmap + createImageBitmap. A bitmap is width, height and `__rgba`
 // (top-down RGBA8), with imageOrientation and premultiplyAlpha APPLIED at
 // creation, as the browser does, so texImage2D's upload is a straight copy.
-import { crop, decodeBytes, domError, flipRows, isBlobLike, premultiply, scaleNearest } from './pixels.js'
+import { crop, domError, flipRows, isBlobLike, premultiply, scaleNearest } from './pixels.js'
+import { decodeImage } from './svg.js'
 
 const KEY = Symbol('ImageBitmap.create')
 
@@ -29,7 +30,7 @@ export function makeImageBitmap(g) {
   // { width, height, rgba, premultiplied } for any accepted source, as a promise.
   function pixelsOf(image) {
     if (image === null || image === undefined) return Promise.reject(new TypeError('createImageBitmap: the source is not an image'))
-    if (isBlobLike(image)) return Promise.resolve(image.arrayBuffer()).then(buf => decodeBytes(g, new Uint8Array(buf)))
+    if (isBlobLike(image)) return Promise.resolve(image.arrayBuffer()).then(buf => decodeImage(g, new Uint8Array(buf)))
     if (image instanceof ImageBitmap) {
       if (!image.__rgba) return Promise.reject(domError(g, 'InvalidStateError', 'createImageBitmap: the ImageBitmap is closed'))
       return Promise.resolve({ width: image.width, height: image.height, rgba: image.__rgba, premultiplied: image.__premultiplied })
