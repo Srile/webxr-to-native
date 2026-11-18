@@ -23,7 +23,7 @@
   },
   "debug": {
     "inspector": true,
-    "port": 9235,
+    "port": 9236,
     "micTone": 660
   }
 }
