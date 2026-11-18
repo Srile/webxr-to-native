@@ -80,11 +80,12 @@ development and experiments; the Quest is the main target, and the Steam Frame r
     - Service workers. A registered worker answers the page's loads as `FetchEvent`s, and controls the page from
       the start of the next launch.
 - **Images**: `createImageBitmap`, `<img>`, PNG, JPEG and WebP decoding off the main thread, and a Canvas 2D
-  subset for UI: paths and `Path2D` (from SVG path data too, every command), anti-aliased fills, strokes with
-  dashes, `roundRect`, `arcTo`, transforms with rotation, clipping, compositing, drawing images. Opt-in: text
-  drawing with `FontFace` fonts (`web.canvasText`), falling back to the platform's symbol, CJK and colour emoji
-  fonts, with synthetic bold for weights a face lacks and rasterised text kept between draws; and SVG images
-  (`web.svg`).
+  subset for UI, drawn as Chrome draws it (`apps/hello-canvas` checks it cell by cell): paths and `Path2D` (from SVG
+  path data too, every command), anti-aliased fills, strokes with dashes and every join, `roundRect`, `arcTo`, the
+  full transform, every CSS colour, gradients, every composite operator, shadows, clipping, `isPointInPath`,
+  drawing images. Opt-in: text drawing with `FontFace` fonts (`web.canvasText`), falling back to the platform's
+  symbol, CJK and colour emoji fonts, with synthetic bold for weights a face lacks and rasterised text kept between
+  draws; and SVG images (`web.svg`: style sheets, `<use>`, `currentColor`, drawn at the size they land at).
 - **The page**:
   - A light DOM: `document`, the elements `index.html` declares, events, pointer and keyboard input outside XR.
   - `index.html`'s classic inline scripts, run before the entry as in a browser (opt-in: `web.inlineScripts`).

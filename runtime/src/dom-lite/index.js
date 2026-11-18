@@ -1,4 +1,5 @@
 // window / document / navigator / timers / performance — stubs and events, no layout.
+import { unescapeXml } from './xml.js'
 import { atob, btoa } from '../fetch/base64.js'
 import * as ev from './events.js'
 import { URL } from '../fetch/url.js'
@@ -284,8 +285,6 @@ export class Document extends Node {
 }
 // DOMParser: XML (and SVG) parse into a real element tree, which three's SVGLoader walks (uikit draws its icons
 // through it); HTML stays a stub document. Elements keep their names' case, as in an XML document.
-const XML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
-const unescapeXml = (t) => t.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#' ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : +e.slice(1)) : XML_ENTITIES[e] ?? m)
 const XMLNS_NS = 'http://www.w3.org/2000/xmlns/', SVG_NS = 'http://www.w3.org/2000/svg'
 // Default xmlns applies to elements only (never to unprefixed attributes) and is inherited. xmlns:prefix binds a
 // prefix for this element and its descendants. lazy-widgets UI XML depends on both: <ui-tree xmlns="lazy-widgets"
