@@ -1,7 +1,8 @@
 // HTMLImageElement / Image: `src` fetches through the global fetch (same
 // routing as the game's own fetches), decodes through __native.img, then
 // fires 'load' (onload AND addEventListener('load')) or 'error'.
-import { decodeBytes, decodeDataUrl, domError } from './pixels.js'
+import { decodeDataUrl, domError } from './pixels.js'
+import { decodeImage } from './svg.js'
 const SW_HOOK = Symbol.for('webxr-host.serviceworker')  // set by runtime/src/serviceworker (host.json web.serviceWorker)
 
 function elementStyle(g) {
@@ -40,6 +41,7 @@ export function makeImageElement(g, { EventTargetBase, makeEvent }) {
       super()
       this.__src = ''
       this.__rgba = null
+      this.__svg = null            // svg.js svgSource of an SVG picture: its rasters at other sizes
       this.__imageState = 'empty'  // 'empty' | 'loading' | 'loaded' | 'error'
       this.__gen = 0
       this.__waiters = []
@@ -137,13 +139,13 @@ export function makeImageElement(g, { EventTargetBase, makeEvent }) {
     __setSrc(url) {
       const gen = ++this.__gen
       this.__src = resolveUrl(url)
-      this.__rgba = null
+      this.__rgba = null; this.__svg = null
       this.naturalWidth = 0; this.naturalHeight = 0
       if (!url) { this.__imageState = 'empty'; this.__settle(false); return }
       this.__imageState = 'loading'
-      loadBytes(this.__src).then(bytes => decodeBytes(g, bytes)).then(px => {
+      loadBytes(this.__src).then(bytes => decodeImage(g, bytes)).then(px => {
         if (gen !== this.__gen) return
-        this.__rgba = px.rgba
+        this.__rgba = px.rgba; this.__svg = px.svg || null
         this.naturalWidth = px.width; this.naturalHeight = px.height
         this.__imageState = 'loaded'
         this.__settle(true)

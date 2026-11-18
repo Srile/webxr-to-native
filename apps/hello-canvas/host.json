@@ -1,0 +1,7 @@
+{
+  "app": { "name": "hello-canvas", "package": "gg.dmnshd.webxrhost.hellocanvas" },
+  "mode": "js",
+  "web": { "origin": "https://app.local", "query": "", "canvasText": true, "svg": true },
+  "xr": { "autoEnter": false },
+  "debug": { "inspector": true, "port": 9235 }
+}

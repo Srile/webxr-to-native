@@ -25,6 +25,10 @@ struct Image {
 // SVG only in a build with HOST_HAS_SVG (nanosvg; CMake HOST_SVG, host.json web.svg).
 Image decode(const uint8_t* bytes, size_t len);
 
+// An SVG document drawn at `scale` times its natural size (ceil(width * scale) x ceil(height * scale)); what
+// decode() gives for scale 1. Fails in a build without HOST_HAS_SVG.
+Image rasterSvg(const uint8_t* bytes, size_t len, float scale);
+
 // True when the bytes look like an SVG document (a BOM, whitespace, then markup with <svg near the start).
 bool isSvg(const uint8_t* bytes, size_t len);
 

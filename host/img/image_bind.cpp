@@ -12,7 +12,9 @@
 //   textRaster(font, fallback, px, spacing, scaleX, scaleY, ox, oy, text, alpha: Uint8Array, out: Int32Array(4 or 5), rgba?: Uint8Array): bool
 //     out[4]: the text has colour emoji, drawn into rgba (w * h * 4, straight alpha) rather than alpha
 //     coverage into alpha, out = w, h, x0, y0 (device px); false with out set when alpha is too small or nothing inks
-// decode takes SVG only with host.json web.svg in a build with HOST_HAS_SVG (nanosvg; CMake HOST_SVG).
+// decode takes SVG only with host.json web.svg in a build with HOST_HAS_SVG (nanosvg; CMake HOST_SVG), and then:
+//   svgRaster(bytes, scale, out: Int32Array(2)): ArrayBuffer | null   — synchronous; the document drawn at `scale`
+//     times its natural size, out = width, height. drawImage asks for an icon at the size it lands at.
 // Result buffers are handed to V8 by backing store, no copy.
 #include <cstring>
 #include <memory>
@@ -143,6 +145,21 @@ void Resize(const v8::FunctionCallbackInfo<v8::Value>& a) {
   a.GetReturnValue().Set(wrapBytes(iso, std::move(out)));
 }
 
+#ifdef HOST_HAS_SVG
+void SvgRaster(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate();
+  bind::Bytes b = a.Length() > 0 ? bind::bytes(a[0]) : bind::Bytes{};
+  bind::Bytes out = a.Length() > 2 && a[2]->IsInt32Array() ? bind::bytes(a[2]) : bind::Bytes{};
+  if (!b.ok) { bind::throwType(iso, "img.svgRaster: bytes must be an ArrayBuffer or a view"); return; }
+  if (!out.ok || out.len < 2 * sizeof(int32_t)) { bind::throwType(iso, "img.svgRaster: out must be an Int32Array of 2"); return; }
+  img::Image im = img::rasterSvg(b.data, b.len, (float)bind::num(a, 1, 1));
+  const int32_t v[2] = {im.ok() ? im.width : 0, im.ok() ? im.height : 0};
+  memcpy(out.data, v, sizeof v);
+  if (!im.ok()) { a.GetReturnValue().SetNull(); return; }
+  a.GetReturnValue().Set(wrapBytes(iso, std::move(im.rgba)));
+}
+#endif
+
 #ifdef HOST_HAS_CANVAS_TEXT
 void FontLoad(const v8::FunctionCallbackInfo<v8::Value>& a) {
   v8::Isolate* iso = a.GetIsolate();
@@ -208,6 +225,9 @@ void installImages(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Hos
   const Json& web = svc.config ? svc.config->at("web") : none;
 
   g_svg = web.bo("svg", false);
+#ifdef HOST_HAS_SVG
+  if (g_svg) bind::fn(ctx, img, "svgRaster", SvgRaster);
+#endif
 #ifdef HOST_HAS_CANVAS_TEXT
   // Absent, the runtime measures text by estimate and draws none, as before (runtime/src/images/canvas2d.js).
   if (web.bo("canvasText", false)) {

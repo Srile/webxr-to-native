@@ -59,6 +59,7 @@ bool isWebp(const uint8_t* b, size_t n) { return n >= 12 && b[0] == 'R' && b[1] 
 }  // namespace
 
 // An SVG document: optional BOM and whitespace, then markup with an <svg element near the start.
+// runtime/src/images/svg.js has the same test in JS: the two must agree on what is an SVG.
 bool isSvg(const uint8_t* b, size_t n) {
   size_t i = 0;
   if (n >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) i = 3;
@@ -69,28 +70,32 @@ bool isSvg(const uint8_t* b, size_t n) {
   return false;
 }
 
-namespace {
-
 #ifdef HOST_HAS_SVG
-// Rasterised at its intrinsic size (width/height in CSS px, 96 dpi; the viewBox when they are absent), as a
-// browser sizes an <img> of it. Paths, fills, strokes, gradients, transforms and opacity are drawn; clip paths,
-// masks, filters, text and embedded images are not.
-Image decodeSvg(const uint8_t* bytes, size_t len) {
+// Rasterised at its intrinsic size (width/height in CSS px, 96 dpi; the viewBox when they are absent) times `scale`,
+// as a browser sizes an <img> of it. Paths, fills, strokes, gradients, transforms and opacity are drawn; clip
+// paths, masks, filters, text and embedded images are not. The runtime hands in a document it rewrote into what
+// nanosvg reads (runtime/src/images/svg.js: CSS rules, <use>, CSS colours).
+Image rasterSvg(const uint8_t* bytes, size_t len, float scale) {
   Image out;
+  if (!bytes || len == 0 || !(scale > 0.0f)) { out.error = "decode failed: bad SVG"; return out; }
   std::vector<char> text(bytes, bytes + len); text.push_back('\0');  // nsvgParse edits its input in place
   NSVGimage* svg = nsvgParse(text.data(), "px", 96.0f);
   if (!svg) { out.error = "decode failed: bad SVG"; return out; }
-  const int w = (int)std::ceil(svg->width), h = (int)std::ceil(svg->height);
+  const int w = (int)std::ceil(svg->width * scale - 1e-3f), h = (int)std::ceil(svg->height * scale - 1e-3f);
   if (w <= 0 || h <= 0 || w > 8192 || h > 8192) { nsvgDelete(svg); out.error = "decode failed: SVG has no usable size"; return out; }
   NSVGrasterizer* rast = nsvgCreateRasterizer();
   if (!rast) { nsvgDelete(svg); out.error = "decode failed: out of memory"; return out; }
   out.rgba.assign((size_t)w * h * 4, 0);
-  nsvgRasterize(rast, svg, 0, 0, 1.0f, out.rgba.data(), w, h, w * 4);
+  nsvgRasterize(rast, svg, 0, 0, scale, out.rgba.data(), w, h, w * 4);
   nsvgDeleteRasterizer(rast); nsvgDelete(svg);
   out.width = w; out.height = h;
   return out;
 }
+#else
+Image rasterSvg(const uint8_t*, size_t, float) { Image out; out.error = "unsupported image format (SVG: build without nanosvg, host.json web.svg)"; return out; }
 #endif
+
+namespace {
 
 void appendBytes(void* ctx, void* data, int size) {
   auto* out = static_cast<std::vector<uint8_t>*>(ctx);
@@ -115,13 +120,7 @@ Image decode(const uint8_t* bytes, size_t len) {
     out.error = "unsupported image format (WebP: build without libwebp)"; return out;
 #endif
   }
-  if (isSvg(bytes, len)) {
-#ifdef HOST_HAS_SVG
-    return decodeSvg(bytes, len);
-#else
-    out.error = "unsupported image format (SVG: build without nanosvg, host.json web.svg)"; return out;
-#endif
-  }
+  if (isSvg(bytes, len)) return rasterSvg(bytes, len, 1.0f);  // an error in a build without nanosvg
 
   if (!isPng(bytes, len) && !isJpeg(bytes, len)) { out.error = "unsupported image format (PNG, JPEG, WebP and SVG only)"; return out; }
   int w = 0, h = 0, channels = 0;

@@ -77,6 +77,13 @@ int main() {
   const char mm[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"5mm\"/>";
   host::img::Image m = decode(reinterpret_cast<const uint8_t*>(mm), sizeof mm - 1);
   assert(m.ok() && m.width == 38 && m.height == 19);
+  // rasterSvg: the same document at another size (what drawImage asks for when the picture lands scaled).
+  host::img::Image twice = host::img::rasterSvg(reinterpret_cast<const uint8_t*>(svgText), sizeof svgText - 1, 2.0f);
+  assert(twice.ok() && twice.width == 40 && twice.height == 20);
+  assert(twice.rgba[(10 * 40 + 8) * 4] == 255 && twice.rgba[(10 * 40 + 8) * 4 + 3] == 255 && twice.rgba[(10 * 40 + 30) * 4 + 3] == 0);
+  host::img::Image half = host::img::rasterSvg(reinterpret_cast<const uint8_t*>(svgText), sizeof svgText - 1, 0.5f);
+  assert(half.ok() && half.width == 10 && half.height == 5);
+  assert(!host::img::rasterSvg(reinterpret_cast<const uint8_t*>(svgText), sizeof svgText - 1, 0.0f).ok());
 #endif
   const char notSvg[] = "<html><body>404</body></html>";
   assert(!host::img::isSvg(reinterpret_cast<const uint8_t*>(notSvg), sizeof notSvg - 1));
