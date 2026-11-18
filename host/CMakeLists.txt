@@ -127,7 +127,7 @@ if(ANDROID)
   # WP-08: Oboe (AAudio) for the WebAudio device stream. Its cmake_minimum_required(3.4.1) predates CMake 4's floor.
   set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
   add_subdirectory(${TP}/oboe oboe)
-  target_link_libraries(webxrhost native_app_glue openxr_loader v8 android log EGL GLESv3 oboe host_webp host_opus host_web_features)
+  target_link_libraries(webxrhost native_app_glue openxr_loader v8 android log EGL GLESv3 mediandk oboe host_webp host_opus host_web_features)
   if(HOST_WEBRTC)
     host_enable_webrtc(webxrhost)
   endif()
@@ -304,7 +304,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT HOST_TESTS)
     list(FILTER LINUX_XR_SOURCES EXCLUDE REGEX "/emu/emu_xr\\.cpp$")
     add_executable(webxrhost-linux-xr ${LINUX_XR_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/linux/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/linux/xr_glue.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/emu/glfw_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/net/http_curl.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/xr/openxr_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_scene.cpp)
+      ${CMAKE_CURRENT_SOURCE_DIR}/xr/openxr_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_scene.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_render_models.cpp)
     # The pinned OpenXR headers (third_party/openxr, 1.1.49) ahead of the distribution's; the loader is the system's.
     target_include_directories(webxrhost-linux-xr BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs ${TP}/openxr/include)
     get_target_property(_defs webxrhost-linux COMPILE_DEFINITIONS)
@@ -514,7 +514,7 @@ if(HOST_TESTS)
   add_executable(loop_test tests/loop_test.cpp core/loop.cpp)
   target_include_directories(loop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   # WP-08: the audio graph's DSP, rendered offline on the Mac.
-  add_executable(audio_test tests/audio_test.cpp audio/graph.cpp audio/analyser.cpp audio/context.cpp audio/offline.cpp audio/decode.cpp audio/webm.cpp audio/mp3.cpp)
+  add_executable(audio_test tests/audio_test.cpp audio/graph.cpp audio/analyser.cpp audio/context.cpp audio/offline.cpp audio/decode.cpp audio/webm.cpp audio/mp3.cpp audio/aac.cpp)
   target_include_directories(audio_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs)
   find_package(Threads REQUIRED)
   target_link_libraries(audio_test Threads::Threads host_opus)

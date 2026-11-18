@@ -14,6 +14,7 @@
 #include <vector>
 #include "xr/xr_input.h"
 #include "xr/xr_scene.h"
+#include "xr/xr_render_models.h"
 
 struct android_app;
 
@@ -38,7 +39,11 @@ struct XrFrameInfo {
   uint32_t sceneGeneration = 0;      // bumps when the scene entity list changes (JS refetches it)
 };
 
-struct SwapchainDesc { bool passthrough = false; bool unpremultiplied = false; bool scene = false; int64_t glFormat = 0x8058 /*GL_RGBA8: the browser model — the shader writes sRGB-encoded texels, no hardware encode on write*/; int width = 0, height = 0; double scale = 1.0; int arraySize = 2; int samples = 1; };  // width/height 0: recommended × scale, read at creation
+// srgbView (host.json xr.srgbSwapchain): an sRGB swapchain with alpha whose images the page draws into through
+// RGBA8 views (GL_OES_texture_view), so the sRGB-encoded bytes it writes are stored as they are and the compositor
+// decodes them once. For runtimes without an RGBA8 swapchain and GL without EXT_sRGB_write_control (SteamVR on the
+// Steam Frame lists sRGB formats first, the first without alpha).
+struct SwapchainDesc { bool passthrough = false; bool unpremultiplied = false; bool scene = false; bool srgbView = false; int64_t glFormat = 0x8058 /*GL_RGBA8: the browser model — the shader writes sRGB-encoded texels, no hardware encode on write*/; int width = 0, height = 0; double scale = 1.0; int arraySize = 2; int samples = 1; };  // width/height 0: recommended × scale, read at creation
 
 // XR_EXT_performance_settings: start level for both domains, and the adaptive step to BOOST when frames miss.
 struct PerfConfig {
@@ -100,6 +105,10 @@ class OpenXrDevice {
 
   // Spaces and bounds
   bool hasStage() const { return stageSpace_ != XR_NULL_HANDLE; }
+  // The frame's base space is at floor level: the stage, or local-floor where host.json picked it.
+  bool baseIsFloor() const { return floorSpace_ != XR_NULL_HANDLE || stageSpace_ != XR_NULL_HANDLE; }
+  // host.json xr.baseSpace "local-floor": XR_EXT_local_floor as the base instead of the stage (before createSession).
+  void setPreferLocalFloor(bool v) { preferLocalFloor_ = v; }
   bool stageBounds(float& w, float& d) const { w = boundsW_; d = boundsD_; return boundsW_ > 0; }
   bool referenceSpaceChanged() { bool c = refChanged_; refChanged_ = false; return c; }
 
@@ -132,11 +141,14 @@ class OpenXrDevice {
   bool hasHandTracking() const { return extHand_; }
   XrInput& input() { return input_; }
   XrScene& scene() { return scene_; }
-  bool passthroughSupported() const { return scene_.passthroughSupported(); }
+  // The runtime's controller models (host.json xr.renderModels; set before createInstance).
+  void setRenderModels(bool on) { renderModels_.setEnabled(on); }
+  XrRenderModels& renderModels() { return renderModels_; }
+  bool passthroughSupported() const { return scene_.passthroughSupported() || envAlphaBlend_; }
   bool sceneSupported() const { return scene_.sceneSupported(); }
   XrInstance instance() const { return instance_; }
   XrSession session() const { return session_; }
-  XrSpace baseSpace() const { return stageSpace_ ? stageSpace_ : localSpace_; }
+  XrSpace baseSpace() const { return floorSpace_ ? floorSpace_ : stageSpace_ ? stageSpace_ : localSpace_; }
   std::string systemName() const { return systemName_; }
 
  private:
@@ -153,9 +165,11 @@ class OpenXrDevice {
   XrInstance instance_ = XR_NULL_HANDLE;
   XrSystemId system_ = XR_NULL_SYSTEM_ID;
   XrSession session_ = XR_NULL_HANDLE;
-  XrSpace localSpace_ = XR_NULL_HANDLE, stageSpace_ = XR_NULL_HANDLE, viewSpace_ = XR_NULL_HANDLE;
+  XrSpace localSpace_ = XR_NULL_HANDLE, stageSpace_ = XR_NULL_HANDLE, viewSpace_ = XR_NULL_HANDLE, floorSpace_ = XR_NULL_HANDLE;
+  bool extLocalFloor_ = false, preferLocalFloor_ = false, envAlphaBlend_ = false;
   XrSwapchain swapchain_ = XR_NULL_HANDLE;
   std::vector<uint32_t> scImages_;
+  std::vector<uint32_t> scViews_;  // RGBA8 views of the images (SwapchainDesc::srgbView), deleted with the swapchain
   int scW_ = 0, scH_ = 0, scArray_ = 1, recW_ = 0, recH_ = 0, viewCount_ = 2;
   int64_t scFormat_ = 0;
   float depthNear_ = 0.1f, depthFar_ = 1000.f; uint32_t depthTex_ = 0;
@@ -182,6 +196,7 @@ class OpenXrDevice {
   int perfLevel_[2] = {-1, -1}, perfCap_[2] = {XR_PERF_SETTINGS_LEVEL_BOOST_EXT, XR_PERF_SETTINGS_LEVEL_BOOST_EXT};
   bool perfBoost_ = false; int perfWinFrames_ = 0, perfWinMisses_ = 0, perfStable_ = 0, perfMissesStat_ = 0; XrTime perfLastPredicted_ = 0;
   XrInput input_;
+  XrRenderModels renderModels_; bool extRenderModel_ = false, extInteractionModel_ = false;
   XrScene scene_; SceneExtensions sceneExt_; bool blendAlpha_ = false, unpremultiplied_ = false;
 };
 

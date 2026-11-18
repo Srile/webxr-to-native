@@ -1,0 +1,33 @@
+--- a/src/impl/peerconnection.cpp
++++ b/src/impl/peerconnection.cpp
+@@ -1090,6 +1090,16 @@
+ 		mLocalDescription->addCandidates(std::move(existingCandidates));
+ 	}
+ 
++	// The answer to a remote offer that added an application line to a connected session: SCTP starts now that
++	// both descriptions carry it (processRemoteDescription left it, the local side having none yet).
++	if (description.hasApplication() && !std::atomic_load(&mSctpTransport)) {
++		auto remote = remoteDescription();
++		auto dtlsTransport = std::atomic_load(&mDtlsTransport);
++		if (remote && remote->hasApplication() && dtlsTransport &&
++		    dtlsTransport->state() == Transport::State::Connected)
++			initSctpTransport();
++	}
++
+ 	mProcessor.enqueue(&PeerConnection::trigger<Description>, shared_from_this(),
+ 	                   &localDescriptionCallback, std::move(description));
+ }
+@@ -1175,9 +1185,12 @@
+ 	}
+ 
+ 	if (description.hasApplication()) {
++		// Only once the local description has its application line too: a remote offer that adds one to a
++		// connected session is answered later, and processLocalDescription starts SCTP then.
+ 		auto sctpTransport = std::atomic_load(&mSctpTransport);
++		auto local = localDescription();
+ 		if (!sctpTransport && dtlsTransport &&
+-		    dtlsTransport->state() == Transport::State::Connected)
++		    dtlsTransport->state() == Transport::State::Connected && local && local->hasApplication())
+ 			initSctpTransport();
+ 	} else {
+ 		mProcessor.enqueue(&PeerConnection::remoteCloseDataChannels, shared_from_this());

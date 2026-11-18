@@ -23,6 +23,12 @@ uint32_t Loop::setTimer(double delayMs, bool repeat, Task t) {
   return id;
 }
 
+void Loop::clear() {
+  std::vector<Task> posted;
+  { std::lock_guard<std::mutex> lock(mu_); posted.swap(posted_); }
+  std::vector<Timer> timers; timers.swap(timers_);
+}  // both go here, outside the lock: a task's destructor may post
+
 void Loop::clearTimer(uint32_t id) {
   for (auto& t : timers_) if (t.id == id) t.dead = true;
 }

@@ -1,0 +1,17 @@
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -336,8 +336,13 @@
+ }
+ 
+ void SctpTransport::start() {
+-	registerIncoming();
++	// Our INIT first, then what reached the lower transport before this one existed (it buffers it, and
++	// registerIncoming() replays it here): incoming() waits for the local INIT, and a peer's INIT replayed before
++	// connect() waited, on this thread and holding the lower transport's receive callback, for a write only this
++	// thread would make. That happens when SCTP starts on a connected session (a data channel added to a call), where
++	// the peer's INIT can arrive before our answer is applied.
+ 	connect();
++	registerIncoming();
+ }
+ 
+ void SctpTransport::stop() { close(); }

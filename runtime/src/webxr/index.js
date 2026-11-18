@@ -21,6 +21,7 @@ import {
 import { F } from './record.js'
 import { InputBridge } from './input.js'
 import { SceneSource } from './scene.js'
+import { installRenderModels } from './render-models.js'
 import { HostLayerTarget } from './layer-target.js'
 
 const BASE_FEATURES = ['viewer', 'local', 'local-floor', 'bounded-floor', 'layers', 'hand-tracking',
@@ -139,8 +140,13 @@ export function install(g) {
   }
 
   // --- the device -----------------------------------------------------------------------------------------
-  // Touch controllers with the fallback profiles the WebXR input profiles registry gives oculus-touch-v3.
-  const controllerConfig = { ...oculusTouchV3, fallbackProfileIds: ['oculus-touch-v2', 'oculus-touch', 'generic-trigger-squeeze-thumbstick'] }
+  // Touch controllers with the fallback profiles the WebXR input profiles registry gives oculus-touch-v3. host.json
+  // xr.controllerProfiles names other controllers with the same layout (the runtime maps them onto the Touch
+  // bindings): the page sees those profiles, most specific first, instead (the Steam Frame's, on SteamVR).
+  const named = Array.isArray(config().controllerProfiles) ? config().controllerProfiles.filter((p) => typeof p === 'string' && p) : []
+  const controllerConfig = named.length
+    ? { ...oculusTouchV3, profileId: named[0], fallbackProfileIds: named.slice(1) }
+    : { ...oculusTouchV3, fallbackProfileIds: ['oculus-touch-v2', 'oculus-touch', 'generic-trigger-squeeze-thumbstick'] }
   // Every mode and feature the host can ever offer; requestSession below narrows them to what this system offers.
   const device = new XRDevice({
     ...metaQuest3,
@@ -168,6 +174,7 @@ export function install(g) {
   if (!g.navigator) g.navigator = {}
   if (!globalThis.navigator) globalThis.navigator = g.navigator
   device.installRuntime({ globalObject: g, forceInstall: true })
+  installRenderModels(g, nx, log)
   if (ownXRCompatible) Object.defineProperty(WGL.prototype, 'makeXRCompatible', ownXRCompatible)
   const system = device[P_DEVICE].xrSystem
   if (g.navigator.xr !== system) Object.defineProperty(g.navigator, 'xr', { value: system, writable: true, configurable: true, enumerable: true })

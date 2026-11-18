@@ -329,6 +329,45 @@ test('__hostWrapTexture hands WebXR a real WebGLTexture for a swapchain name', (
   assert.equal(ctx.getParameter(ctx.TEXTURE_BINDING_2D_ARRAY), t)
 })
 
+test('uniform locations are read once per link when the host batches them', () => {
+  const { g, gl, ctx } = host({ batchUniforms: true, answers: { uniformLocations: { uColor: 3, 'uBones[0]': 5, uBones: 5, 'uBones[1]': 6, uBlockMember: -1 } } })
+  const prog = ctx.createProgram()
+  ctx.linkProgram(prog)
+  const a = ctx.getUniformLocation(prog, 'uColor')
+  assert.ok(a instanceof g.WebGLUniformLocation); assert.equal(a._loc, 3)
+  assert.equal(ctx.getUniformLocation(prog, 'uBones')._loc, 5)
+  assert.equal(ctx.getUniformLocation(prog, 'uBones[1]')._loc, 6)
+  assert.equal(ctx.getUniformLocation(prog, 'missing'), null, 'a name GL does not list is null')
+  assert.equal(ctx.getUniformLocation(prog, 'uBlockMember'), null, 'a block member has no location')
+  assert.equal(count(gl, 'getUniformLocations'), 1, 'one batch read for every name')
+  assert.equal(count(gl, 'getUniformLocation'), 0, 'no per-name round trips')
+  ctx.linkProgram(prog)
+  ctx.getUniformLocation(prog, 'uColor')
+  assert.equal(count(gl, 'getUniformLocations'), 2, 'a new link reads them again')
+  assert.equal(ctx.getUniformLocation(null, 'uColor'), null)
+})
+
+test('object names come from a per-context pool, one round trip per batch', () => {
+  const { g, gl, ctx } = host({ namePools: true })
+  const buffers = Array.from({ length: 70 }, () => ctx.createBuffer())
+  assert.ok(buffers.every(b => b instanceof g.WebGLBuffer && b._name > 0))
+  assert.equal(new Set(buffers.map(b => b._name)).size, 70, 'every name is fresh')
+  assert.equal(count(gl, 'genNames'), 2, '70 buffers: two batches of 64')
+  assert.equal(count(gl, 'createBuffer'), 0, 'no per-object round trips')
+  const t = ctx.createTexture(), v = ctx.createVertexArray(), f = ctx.createFramebuffer(), r = ctx.createRenderbuffer()
+  assert.ok(t instanceof g.WebGLTexture && v instanceof g.WebGLVertexArrayObject && f instanceof g.WebGLFramebuffer && r instanceof g.WebGLRenderbuffer)
+  assert.deepEqual(gl.calls.filter(c => c[0] === 'genNames').map(c => c[1]), ['buffer', 'buffer', 'texture', 'vao', 'framebuffer', 'renderbuffer'])
+  const name = buffers[3]._name
+  ctx.deleteBuffer(buffers[3])
+  assert.deepEqual(last(gl, 'deleteBuffer'), ['deleteBuffer', name], 'a pooled name is deleted as any other')
+})
+
+test('without the native batch, create* asks for each name', () => {
+  const { gl, ctx } = host()
+  ctx.createBuffer(); ctx.createTexture()
+  assert.equal(count(gl, 'createBuffer'), 1); assert.equal(count(gl, 'createTexture'), 1)
+})
+
 test('every three r181 entry point exists on the context', () => {
   const { ctx } = host()
   const needed = ('activeTexture attachShader bindAttribLocation bindBuffer bindBufferBase bindFramebuffer bindRenderbuffer bindTexture bindVertexArray blendColor blendEquation ' +
@@ -416,6 +455,17 @@ test('an opaque texture re-attaches to the framebuffers it was attached to when 
   assert.deepEqual(re, [['framebufferTexture2D', ctx.FRAMEBUFFER, ctx.COLOR_ATTACHMENT0, ctx.TEXTURE_2D, 8, 0]], 'the same attachment, the new image')
   assert.equal(gl.calls.at(-1)[0], 'bindFramebuffer', 'the previous binding is restored after')
   gl.calls.length = 0; ctx._reattachOpaque(tex); assert.equal(gl.calls.length, 0, 'nothing to do while the name holds')
+})
+
+test('deleting the opaque texture leaves the swapchain image alone', () => {
+  const { g, gl, ctx } = host()
+  const tex = g.__hostOpaqueTexture(() => 7)
+  gl.calls.length = 0
+  ctx.deleteTexture(tex)
+  assert.equal(gl.calls.filter(c => c[0] === 'deleteTexture').length, 0, 'no glDeleteTextures of the runtime\'s image')
+  assert.equal(tex._name, 7)
+  const own = ctx.createTexture(); ctx.deleteTexture(own)
+  assert.equal(gl.calls.filter(c => c[0] === 'deleteTexture').length, 1, 'the page\'s own textures still go')
 })
 
 test('call path: WebIDL-converted full-arity scalars, typed arrays by identity, a constant native holder', async () => {

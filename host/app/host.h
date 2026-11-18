@@ -87,6 +87,7 @@ class Host {
   bool eglUp_ = false, xrInstance_ = false, xrSession_ = false, xrActive_ = false, resumed_ = false, clearUp_ = false, jsUp_ = false;
   ANativeWindow* window_ = nullptr;
   double statT_ = 0; int frames_ = 0; double lastFlat_ = 0; double jsMs_ = 0, waitMs_ = 0, endMs_ = 0;
+  double lastFrameStart_ = 0, lastFrameEnd_ = 0;  // the slow-frame diagnostic's
   XrSessionState lastState_ = XR_SESSION_STATE_UNKNOWN;
   bool scenePermissionAsked_ = false;
   // The Quest's page visibility (updateVisibility): hidden_ once the immersive session has been seen VISIBLE/FOCUSED

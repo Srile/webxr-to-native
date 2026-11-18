@@ -151,6 +151,13 @@ std::string urlEncode(const std::string& s) {
 void pcCreate(const v8::FunctionCallbackInfo<v8::Value>& a) {
   v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext();
   rtc::Configuration cfg; cfg.disableAutoNegotiation = true;  // the page negotiates, as in a browser
+#ifdef HOST_HAS_WEBRTC_MEDIA
+  // DTLS-SRTP from the start, as a browser has it: a connection that begins with data channels only can take audio
+  // later (libdatachannel otherwise picks plain DTLS when the first description has no media, and a track added
+  // after cannot open). Browsers and libdatachannel always negotiate DTLS-SRTP (RFC 8827); a peer that does not
+  // keeps its data channels (tools/patches/libdatachannel-0.24.6-srtp-optional.patch).
+  cfg.forceMediaTransport = true;
+#endif
   if (bind::boolean(a, 1)) cfg.iceTransportPolicy = rtc::TransportPolicy::Relay;
   auto get = [&](v8::Local<v8::Object> o, const char* k) { v8::Local<v8::Value> v; return o->Get(ctx, bind::str(iso, k)).ToLocal(&v) && v->IsString() ? Engine::toStdString(iso, v) : std::string(); };
   if (a.Length() > 0 && a[0]->IsArray()) {
@@ -370,7 +377,9 @@ void audioAdd(const v8::FunctionCallbackInfo<v8::Value>& a) {
     { static std::mt19937 rng{std::random_device{}()}; do x->ssrc = (uint32_t)rng(); while (x->ssrc == 0); }
     const std::string stream = "webxr-host-" + std::to_string(pcId), trackId = "audio-" + mid;
     rtc::Description::Audio media(mid, rtc::Description::Direction::SendRecv);
-    media.addOpusCodec(pt);
+    // Voice, as browsers offer it: mono, FEC. libdatachannel's default profile (maxaveragebitrate=96000, stereo=1) had
+    // a browser peer send 96 kb/s of stereo to a host that decodes mono, three times its voice default.
+    media.addOpusCodec(pt, std::string("minptime=10;useinbandfec=1"));
     media.addSSRC(x->ssrc, std::string("webxr-host"), stream, trackId);
     x->track = p->addTrack(media);
     auto cfg = std::make_shared<rtc::RtpPacketizationConfig>(x->ssrc, "webxr-host", (uint8_t)pt, rtc::OpusRtpPacketizer::DefaultClockRate);
@@ -378,6 +387,10 @@ void audioAdd(const v8::FunctionCallbackInfo<v8::Value>& a) {
     packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(cfg));
     packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
     packetizer->addToChain(std::make_shared<rtc::OpusRtpDepacketizer>());  // what arrives: RTP -> Opus frames
+    // Receiver reports for what arrives (answering each sender report): the sender learns the loss it causes, and a
+    // browser's Opus encoder only puts in-band FEC in its packets once loss is reported. Last in the chain, so it
+    // sees the RTP before the depacketizer (incoming runs from the chain's end); it keeps the RTCP to itself.
+    packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     x->track->setMediaHandler(packetizer);
     x->remoteId = g_nextRemote++; x->remote = new RemoteAudio(x->remoteId); g_remote[x->remoteId] = x->remote;
     RemoteAudio* r = x->remote; r->ref();  // the frame callback's own reference, dropped with the track

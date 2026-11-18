@@ -24,7 +24,7 @@ to you.
 
 Builds with `network.webrtc` contain libdatachannel and libjuice, which are MPL-2.0. MPL-2.0 asks you to tell the
 people you distribute to where the source code of those files is. The notices file does that: it names the
-upstream release and the one patch this toolkit applies (`tools/patches/libdatachannel-0.24.6-mbedtls-verify.patch`).
+upstream release and the patches this toolkit applies (`tools/patches/libdatachannel-0.24.6-*.patch`).
 
 The prebuilt libraries attached to this repository's releases (`v8-apple-*`, `angle-apple-*`, and `v8-android-intl-*`, the
 Android V8 with ICU that `js.intl` links) are binary distributions of V8, ICU and ANGLE too. Each archive carries
@@ -77,7 +77,8 @@ Everything here is MIT (LICENSE) except:
 - `host/win/khr/KHR/khrplatform.h`: derived from the Khronos Group's `khrplatform.h`. Its MIT-style notice is in
   the file.
 - `tools/patches/`: changes to the projects they patch, under those projects' licences.
-  - `libdatachannel-0.24.6-mbedtls-verify.patch`: MPL-2.0.
+  - `libdatachannel-0.24.6-*.patch` (mbedtls-verify, mbedtls-partial-write, track-mid-reuse, sctp-mid-session,
+    sctp-start-order, srtp-optional): MPL-2.0.
   - `v8-apple/0001-xros-target-platform.patch` and `angle-apple/0002-xros-codesign-bundle-kind.patch`: they patch
     Chromium's build files, BSD-3-Clause.
 - `licenses/`: the upstream licence texts, each under its own terms.

@@ -96,20 +96,22 @@ export function makeFonts(g, { EventTargetBase }) {
     }
     return best
   }
-  // { id, fallback, px }: id the face to draw with (-1: none), fallback the face for code points it lacks.
+  // { id, fallback, px, bold }: id the face to draw with (-1: none), fallback the face for code points it lacks.
   function resolveFont(font) {
     let r = resolved.get(font)
     if (r) return r
     const p = parse(font) || { px: 10, weight: 400, italic: false, families: ['sans-serif'] }
     const fallback = systemFont()
-    let id = -1
+    let id = -1, faceWeight = 400   // the platform's faces are its regular weight
     for (const fam of p.families) {
       const key = fam.toLowerCase()
       const list = byFamily.get(key)
-      if (list && list.length) { id = pick(list, p.weight, p.italic).__id; break }
+      if (list && list.length) { const face = pick(list, p.weight, p.italic); id = face.__id; faceWeight = weightOf(face.weight); break }
       if (GENERIC.has(key)) break
     }
-    r = { id: id >= 0 ? id : fallback, fallback, px: p.px }
+    // bold: how much heavier the text asks to be than the face it gets (0..1 of a regular-to-bold step), drawn by
+    // growing the glyphs (canvas2d.js embolden).
+    r = { id: id >= 0 ? id : fallback, fallback, px: p.px, bold: Math.max(0, Math.min(1, (p.weight - faceWeight - 50) / 250)) }
     if (resolved.size >= 256) resolved.clear()
     resolved.set(font, r)
     return r

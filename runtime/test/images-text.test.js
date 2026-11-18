@@ -83,7 +83,8 @@ test('fillText paints the coverage in the fill colour at the aligned, transforme
   ctx.textAlign = 'right'
   ctx.fillText('ab', 10, 8)   // width 10 user px: the pen starts at user x 0, device x 2; baseline device y 16
   const r = calls.raster.at(-1)
-  assert.equal(r.ox, 2); assert.equal(r.oy, 16); assert.equal(r.sx, 2); assert.equal(r.sy, 2)
+  // Rasterised at the pen's sub-pixel phase (whole pixels here), placed at its pixel (2, 16): see the cache test.
+  assert.equal(r.ox, 0); assert.equal(r.oy, 0); assert.equal(r.sx, 2); assert.equal(r.sy, 2)
   assert.deepEqual(px(c.__rgba, 40, 2, 15), [255, 0, 0, 255])
   assert.deepEqual(px(c.__rgba, 40, 21, 2), [255, 0, 0, 255])
   assert.deepEqual(px(c.__rgba, 40, 22, 15), [0, 0, 0, 0])
@@ -92,6 +93,20 @@ test('fillText paints the coverage in the fill colour at the aligned, transforme
   ctx.fillText('a', 30, 19, 2)   // maxWidth 2 of 5: condensed horizontally
   assert.equal(calls.raster.at(-1).sx, 0.4)
   assert.equal(px(c.__rgba, 40, 30, 18)[2], 255); assert.equal(px(c.__rgba, 40, 30, 18)[3], 127)
+})
+
+test('fillText keeps rasterised text: the same label again, or moved by whole pixels, is drawn without a raster', () => {
+  const { g, calls } = textGlobal()
+  const c = new g.OffscreenCanvas(60, 20), ctx = c.getContext('2d')
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#ff0000'
+  ctx.fillText('ab', 2, 10)
+  const n = calls.raster.length
+  ctx.clearRect(0, 0, 60, 20); ctx.fillText('ab', 2, 10)
+  ctx.fillText('ab', 30, 12)                               // moved by whole pixels
+  assert.equal(calls.raster.length, n)
+  assert.deepEqual(px(c.__rgba, 60, 2, 9), [255, 0, 0, 255]); assert.deepEqual(px(c.__rgba, 60, 30, 11), [255, 0, 0, 255])
+  ctx.fillText('ab', 30.5, 12); ctx.fillText('ba', 2, 10)  // another phase, another string
+  assert.equal(calls.raster.length, n + 2)
 })
 
 test('fillText grows its coverage scratch for large text and draws nothing for blank text', () => {

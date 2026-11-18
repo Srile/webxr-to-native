@@ -44,6 +44,8 @@ void installWorkers(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, Ho
 void installPlatform(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
 // __native.rtc: WebSocket + WebRTC data channels (rtc/rtc_bind.cpp, WP-21); nothing in a build without HOST_WEBRTC.
 void installRtc(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
+// __native.steam (host/steam/steam_bind.cpp): Steamworks through the game's libsteam_api.so, for host.json steam.appId.
+void installSteam(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);
 // __native.media: microphone capture (media/media_bind.cpp, WP-25), only in a build with HOST_MICROPHONE (host.json
 // media.microphone); installed before installAudio, which then binds __native.audio.setInput to its tracks.
 void installMedia(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostServices& svc);

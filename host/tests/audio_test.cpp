@@ -496,10 +496,11 @@ static void testWebm() {
     printf("%s: %d ch, %u frames\n", fx.file, b->channels, b->length);
     b->unref();
   }
-  // Not MPEG audio: an ADTS AAC header (layer bits 00) is refused, not scanned for MP3 frames.
+  // Not MPEG audio: an ADTS AAC header (layer bits 00) is taken as AAC, not scanned for MP3 frames; off
+  // Android (no MediaCodec) it is refused as AAC.
   const uint8_t adts[16] = {0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC};
   err.clear(); AudioBufferData* aac = decodeAudio(adts, sizeof adts, 48000, &err);
-  CHECK(!aac && err == "unsupported audio container", "adts aac refused: %s", err.c_str());
+  CHECK(!aac && err.find("AAC") != std::string::npos, "adts aac refused as AAC: %s", err.c_str());
 
   const char* list = getenv("AUDIO_TEST_WEBM");
   if (!list) { printf("(AUDIO_TEST_WEBM not set; game webm files skipped)\n"); return; }

@@ -17,6 +17,14 @@ function sandbox(info = {}, pad = null, config = null, shown = null) {
   return { g, canvas, rec }
 }
 
+test('text nodes take nodeValue as React writes it', () => {
+  const { g } = sandbox()
+  const text = g.document.createTextNode('Lobby'), note = g.document.createComment('a')
+  text.nodeValue = 'Sandbox'; note.nodeValue = 'b'
+  assert.equal(text.data, 'Sandbox'); assert.equal(text.textContent, 'Sandbox'); assert.equal(note.nodeValue, 'b')
+  text.nodeValue = null; assert.equal(text.data, '')
+})
+
 test('events capture on window, reach the target, bubble back', () => {
   const { g, canvas } = sandbox(); const order = []
   g.addEventListener('x', () => order.push('win-capture'), true); g.addEventListener('x', () => order.push('win-bubble'))

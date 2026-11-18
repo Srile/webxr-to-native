@@ -184,6 +184,10 @@ function originOf(url) { try { return new URL(url).origin } catch { return 'null
 export function installFetch(g) {
   const n = g.__native
   const same = () => (g.location?.origin ?? n.config?.web?.origin ?? 'https://app.local').replace(/\/$/, '')
+  // host.json web.remote: same-origin path prefixes (like "/api/") the site answers rather than the packed files,
+  // fetched from web.origin over the network (it must be in network.allow).
+  const remote = (Array.isArray(n.config?.web?.remote) ? n.config.web.remote : []).filter((p) => typeof p === 'string' && p.startsWith('/'))
+  const packed = (url, origin) => !remote.length || !remote.some((p) => url.slice(origin.length).startsWith(p))
   g.fetch = function fetch(input, init = {}) {
     const req = input instanceof Request && !init.body ? input : new Request(input, init)
     return new Promise((resolve, reject) => {
@@ -192,7 +196,7 @@ export function installFetch(g) {
       if (url.startsWith('blob:')) { const obj = lookupObjectURL(url); if (!obj) return reject(new TypeError(`Failed to fetch: ${url}`)); return resolve(new Response(obj, { status: 200, url, headers: { 'content-type': obj.type || 'application/octet-stream', 'content-length': String(obj.size) } })) }
       if (url.startsWith('data:')) { try { const m = /^data:([^,]*?)(;base64)?,(.*)$/s.exec(url); const type = m[1] || 'text/plain;charset=US-ASCII'; const raw = m[2] ? Uint8Array.from(atob(m[3]), c => c.charCodeAt(0)) : encodeUtf8(decodeURIComponent(m[3])); return resolve(new Response(raw, { status: 200, url, headers: { 'content-type': type } })) } catch (e) { return reject(new TypeError(`Failed to fetch data URL`)) } }
       const origin = same()
-      if (url.startsWith(origin + '/') || url === origin) {
+      if ((url.startsWith(origin + '/') || url === origin) && packed(url, origin)) {
         if (req.method !== 'GET' && req.method !== 'HEAD') return reject(new TypeError(`Failed to fetch: ${req.method} ${url} (assets are read-only)`))
         const path = url.slice(origin.length + 1).split(/[?#]/)[0]
         const bytes = n.assets.read(path)

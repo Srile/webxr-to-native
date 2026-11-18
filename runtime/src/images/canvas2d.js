@@ -61,17 +61,109 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   // edges are 5 doubles each (x0, y0, x1, y1, winding), crossings an x and a winding per entry.
   let edgeBuf = new Float64Array(5 * 256), xsBuf = new Float64Array(64), wsBuf = new Float64Array(64), covBuf = new Float32Array(258), difBuf = new Float32Array(258)   // a pixel row's coverage (scanFill)
   let orderBuf = new Int32Array(256), activeBuf = new Int32Array(256)   // edge offsets by top, and the ones a scanline crosses
+  let touchBuf = new Int32Array(64)   // the cov/dif columns a pixel row's crossings wrote (scanFill)
   const gradPx = new Float64Array(4)   // a gradient colour at one pixel
   // Text scratch (__native.img.textMeasure / textRaster): metrics, a glyph-run coverage mask and its box.
-  const textMetrics = new Float64Array(7), textBox = new Int32Array(4), emBox = new Float64Array(2)
+  const textMetrics = new Float64Array(7), textBox = new Int32Array(5), emBox = new Float64Array(2)
   let textAlpha = new Uint8Array(64 * 1024)
+  let textRgba = new Uint8Array(0)   // colour emoji (textBox[4]): RGBA, straight alpha, grown when text has any
+  let boldA = new Uint8Array(0), boldT = new Uint8Array(0), boldRgba = new Uint8Array(0)
+
+  // Rasterised text, kept by everything that shapes it (face, size, scale, quarter-pixel phase, weight, the string):
+  // a menu repainting a hovered button draws the same labels again, and a raster (and its synthetic bold) costs far
+  // more than a copy. At most 256 entries and 4 MB of coverage, the least recently used dropped first.
+  const textCache = new Map()
+  let textCacheBytes = 0
+  const cacheGet = (key) => { const e = textCache.get(key); if (e) { textCache.delete(key); textCache.set(key, e) } return e }
+  const cachePut = (key, e) => {
+    textCache.set(key, e); textCacheBytes += e.A.length + (e.RGBA ? e.RGBA.length : 0)
+    while (textCache.size > 256 || textCacheBytes > 4 << 20) {
+      const [k, old] = textCache.entries().next().value
+      textCache.delete(k); textCacheBytes -= old.A.length + (old.RGBA ? old.RGBA.length : 0)
+    }
+  }
+  // Synthetic bold for a face that has no heavier weight (the platform's): the coverage dilated by r device pixels
+  // (whole rings, then the fraction of one more), padded so nothing is cut off. Colour emoji are padded, not grown.
+  function embolden(a, w, h, r, rgba) {
+    const full = Math.floor(r), frac = r - full, R = full + (frac > 0 ? 1 : 0), W = w + 2 * R, H = h + 2 * R, n = W * H
+    if (boldA.length < n) { boldA = new Uint8Array(n); boldT = new Uint8Array(n) }
+    const P = boldA, T = boldT
+    P.fill(0, 0, n)
+    for (let y = 0; y < h; y++) P.set(a.subarray(y * w, y * w + w), (y + R) * W + R)
+    const pass = (src, dst, step, len, lines, lineStep) => {
+      for (let l = 0; l < lines; l++) {
+        const base = l * lineStep
+        for (let i = 0; i < len; i++) {
+          let m = 0
+          const k0 = i - full < 0 ? 0 : i - full, k1 = i + full >= len ? len - 1 : i + full
+          for (let j = k0, o = base + k0 * step; j <= k1; j++, o += step) { const v = src[o]; if (v > m) m = v }
+          if (frac > 0 && m < 255) {
+            const l0 = i - full - 1, l1 = i + full + 1
+            if (l0 >= 0) { const v = src[base + l0 * step] * frac; if (v > m) m = v }
+            if (l1 < len) { const v = src[base + l1 * step] * frac; if (v > m) m = v }
+          }
+          dst[base + i * step] = m
+        }
+      }
+    }
+    pass(P, T, 1, W, H, W)   // rows
+    pass(T, P, W, H, W, 1)   // columns
+    let out = null
+    if (rgba) {
+      if (boldRgba.length < n * 4) boldRgba = new Uint8Array(n * 4)
+      out = boldRgba; out.fill(0, 0, n * 4)
+      for (let y = 0; y < h; y++) out.set(rgba.subarray(y * w * 4, (y * w + w) * 4), ((y + R) * W + R) * 4)
+    }
+    return { a: P, rgba: out, w: W, h: H, pad: R }
+  }
+  // A run's raster at scale (sx, sy) with its pen at (qx, qy) inside its first pixel: from the cache, or rastered
+  // (synthetic bold applied) and kept. { w, h, bx, by: the box from the pen's whole pixel, A: coverage, RGBA: colour
+  // emoji or null }, or null when nothing inks.
+  function textEntry(n, f, spacing, sx, sy, qx, qy, text) {
+    const key = `${f.id}|${f.fallback}|${f.px}|${spacing}|${sx}|${sy}|${qx}|${qy}|${f.bold || 0}|${text}`
+    let entry = cacheGet(key)
+    if (entry) return entry
+    if (!n.textRaster(f.id, f.fallback, f.px, spacing, sx, sy, qx, qy, text, textAlpha, textBox, textRgba)) {
+      const need = textBox[0] * textBox[1], colour = textBox[4] === 1
+      if (need <= textAlpha.length && (!colour || need * 4 <= textRgba.length)) return null   // nothing inked
+      if (need > textAlpha.length) textAlpha = new Uint8Array(Math.max(need, textAlpha.length * 2))
+      if (colour && need * 4 > textRgba.length) textRgba = new Uint8Array(Math.max(need * 4, textRgba.length * 2))
+      if (!n.textRaster(f.id, f.fallback, f.px, spacing, sx, sy, qx, qy, text, textAlpha, textBox, textRgba)) return null
+    }
+    let w = textBox[0], h = textBox[1], bx = textBox[2], by = textBox[3], A = textAlpha, RGBA = textRgba
+    const colour = textBox[4] === 1
+    // A weight the face doesn't have (600 on the platform's regular face): grown by about 3.5% of the em at bold.
+    if (f.bold > 0) {
+      const r = f.bold * f.px * sy * 0.035
+      if (r >= 0.2) { const b = embolden(A, w, h, r, colour ? RGBA : null); A = b.a; RGBA = b.rgba || RGBA; bx -= b.pad; by -= b.pad; w = b.w; h = b.h }
+    }
+    entry = { w, h, bx, by, A: A.slice(0, w * h), RGBA: colour ? RGBA.slice(0, w * h * 4) : null }
+    cachePut(key, entry)
+    return entry
+  }
+  // Bilinear sample of a w x h coverage (stride 1) or RGBA (stride 4, channel ch) buffer at (x, y), pixel centres on
+  // whole numbers; 0 outside.
+  function sampleAt(buf, w, h, x, y, stride = 1, ch = 0) {
+    const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0
+    const at = (i, j) => (i < 0 || j < 0 || i >= w || j >= h ? 0 : buf[(j * w + i) * stride + ch])
+    return (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy
+  }
   let textNative = null, textFace = null, textSpacing = 0   // set by __textSetup for the call that follows it
   const clampPx = new Uint8ClampedArray(4)   // rounds/clamps a filtered pixel exactly as a Uint8ClampedArray store does
+  // A canvas's pixels as 32-bit words, for filling opaque spans a pixel at a time.
+  const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
+  const wordViews = new WeakMap()
+  const words = (buf) => {
+    let w = wordViews.get(buf)
+    if (!w) { w = new Uint32Array(buf.buffer, buf.byteOffset, buf.length >> 2); wordViews.set(buf, w) }
+    return w
+  }
 
   // Source-over of one constant colour (a in 0..255, fractional allowed) over buf[i, end):
   // blendPixel inlined over a span, byte-identical to it.
   function blendSpan(buf, i, end, r, gg, b, a) {
     if (a <= 0) return
+    if (end - i >= 32 && (a >= 255 || buf[i + 3] === 0) && (i = wordRun(buf, i, end, r, gg, b, a)) >= end) return
     if (a >= 255) { for (; i < end; i += 4) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = 255 } return }
     const sa = a / 255, ia = 1 - sa, rs = r * sa, gs = gg * sa, bs = b * sa
     for (; i < end; i += 4) {
@@ -83,6 +175,18 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       buf[i + 2] = Math.round((bs + buf[i + 2] * k) / oa)
       buf[i + 3] = Math.round(oa * 255)
     }
+  }
+  // blendSpan's long spans as 32-bit words, out of it so it stays small enough to inline (a stroke paints a span per
+  // edge pixel): an opaque span whole, or the run of transparent pixels a translucent span starts over (they take the
+  // colour as it is). The bytes a Uint8ClampedArray store would write (rounded, clamped). Returns where blendSpan's
+  // own loop goes on from: `end` when it painted it all, `i` when it painted nothing.
+  function wordRun(buf, i, end, r, gg, b, a) {
+    if (!LITTLE_ENDIAN || (buf.byteOffset & 3) !== 0) return i
+    let j = end
+    if (a < 255) { j = i + 4; while (j < end && buf[j + 3] === 0) j += 4; if (j - i < 32) return i }
+    clampPx[0] = r; clampPx[1] = gg; clampPx[2] = b; clampPx[3] = a
+    words(buf).fill((clampPx[0] | clampPx[1] << 8 | clampPx[2] << 16 | clampPx[3] << 24) >>> 0, i >> 2, j >> 2)
+    return j
   }
   // blendSpan for source-over; copy replaces the span, destination-out punches its alpha (the colour is unused) and
   // every other operator goes pixel by pixel.
@@ -96,15 +200,38 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       for (; i < end; i += 4) buf[i + 3] = Math.round(buf[i + 3] * k)
       return
     }
+    if (mode === 4) {
+      // Destination-over: what is already opaque stays (most of a panel painted under its contents), skipped here.
+      if (a <= 0) return
+      for (; i < end; i += 4) if (buf[i + 3] < 255) compositePixel(buf, i, r, gg, b, a, mode)
+      return
+    }
     for (; i < end; i += 4) compositePixel(buf, i, r, gg, b, a, mode)
   }
 
+  // A gradient's colours are looked up in a table of this many steps along t, built once per set of stops and shared
+  // by every gradient with the same stops (a UI makes a new gradient per button per repaint, the same few over and
+  // over): a menu's gradient-filled buttons cost ~90% of a repaint when every pixel searched and interpolated them.
+  const GRADIENT_STEPS = 4096
+  const RAMP_TABLES = 64, rampTables = new Map()   // 64 KB each, the most recently used sets of stops
   class CanvasGradient {
-    constructor(kind, p) { this.__kind = kind; this.__p = p; this.__stops = [] }
+    constructor(kind, p) { this.__kind = kind; this.__p = p; this.__stops = []; this.__table = null }
     addColorStop(offset, color) {
       offset = Number(offset); if (!(offset >= 0 && offset <= 1)) throw domError(g, 'IndexSizeError', 'addColorStop: offset out of range')
       const c = colour(String(color)); if (!c) throw domError(g, 'SyntaxError', `addColorStop: '${color}' is not a colour`)
-      this.__stops.push([offset, c]); this.__stops.sort((a, b) => a[0] - b[0])
+      this.__stops.push([offset, c]); this.__stops.sort((a, b) => a[0] - b[0]); this.__table = null
+    }
+    // RGBA (alpha 0..255, unrounded) at GRADIENT_STEPS points of t in 0..1: __ramp's colours.
+    __lut() {
+      if (this.__table) return this.__table
+      const key = this.__stops.map(([o, c]) => o + ':' + c[0] + ',' + c[1] + ',' + c[2] + ',' + c[3]).join(';')
+      let table = rampTables.get(key)
+      if (table) { rampTables.delete(key); rampTables.set(key, table); return (this.__table = table) }
+      table = new Float32Array(GRADIENT_STEPS * 4); const out = [0, 0, 0, 0]
+      for (let i = 0; i < GRADIENT_STEPS; i++) { this.__ramp(i / (GRADIENT_STEPS - 1), out); table[i * 4] = out[0]; table[i * 4 + 1] = out[1]; table[i * 4 + 2] = out[2]; table[i * 4 + 3] = out[3] }
+      rampTables.set(key, table)
+      if (rampTables.size > RAMP_TABLES) rampTables.delete(rampTables.keys().next().value)
+      return (this.__table = table)
     }
     // Spec parameter t for a user-space point, or NaN where the gradient paints nothing.
     __t(x, y) {
@@ -118,11 +245,14 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       return p[2] + t * dr >= 0 ? t : NaN
     }
     __colorAt(x, y, out) {
-      const st = this.__stops
-      if (!st.length) { out[0] = out[1] = out[2] = out[3] = 0; return }
-      let t = this.__t(x, y)
+      if (!this.__stops.length) { out[0] = out[1] = out[2] = out[3] = 0; return }
+      const t = this.__t(x, y)
       if (Number.isNaN(t)) { out[0] = out[1] = out[2] = out[3] = 0; return }
-      t = t < 0 ? 0 : t > 1 ? 1 : t
+      this.__ramp(t < 0 ? 0 : t > 1 ? 1 : t, out)
+    }
+    // The colour at t (0..1) between the stops.
+    __ramp(t, out) {
+      const st = this.__stops
       let i = 0; while (i < st.length && st[i][0] <= t) i++
       if (i === 0) { const c = st[0][1]; out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3]; return }
       if (i === st.length) { const c = st[st.length - 1][1]; out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3]; return }
@@ -240,10 +370,18 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     const bx0 = Math.max(0, Math.floor(minX)), bx1 = Math.min(cw, Math.ceil(maxX)), bw = bx1 - bx0
     // cov: each pixel's partly covered share; dif: where full coverage starts and ends, summed along the row. Both
     // are all zero between rows (a row clears what it read).
-    if (aa) { if (!(bw > 0)) return; if (covBuf.length < bw + 2) { covBuf = new Float32Array(Math.max(bw + 2, covBuf.length * 2)); difBuf = new Float32Array(covBuf.length) } }
-    const cov = covBuf, dif = difBuf, lines = aa ? 4 : 1, weight = 1 / lines
+    if (aa) {
+      if (!(bw > 0)) return
+      if (covBuf.length < bw + 2) { covBuf = new Float32Array(Math.max(bw + 2, covBuf.length * 2)); difBuf = new Float32Array(covBuf.length) }
+      if (touchBuf.length < 12 * ne) touchBuf = new Int32Array(Math.max(12 * ne, touchBuf.length * 2))   // 3 columns a crossing, at most ne crossings on each of 4 lines
+    }
+    // A row records the columns it writes (for sparseRow) when the row above was wide: a shape's rows are alike, so
+    // a panel or an outline reads sparsely from its second row on, and a thin stroke never pays for the record.
+    let record = false
+    const cov = covBuf, dif = difBuf, touch = touchBuf, lines = aa ? 4 : 1, weight = 1 / lines
     for (let py = y0; py < y1; py++) {
-      let lo = bw, hi = 0
+      let lo = bw, hi = 0, nt = 0
+      const sparse = record
       for (let line = 0; line < lines; line++) {
         const sy = py + (line + 0.5) * weight
         // The edges this line crosses: those that started above it (in order of their top) and have not ended.
@@ -261,24 +399,43 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
         }
         na = live
         let wind = 0
+        if (!sparse) {
+          for (let i = 0; i < nx - 1; i++) {
+            wind += evenodd ? 1 : ws[i]
+            if (!(evenodd ? (wind & 1) === 1 : wind !== 0)) continue
+            if (!aa) {
+              const xa = Math.max(0, Math.round(xs[i])), xb = Math.min(cw, Math.round(xs[i + 1]))
+              if (xb > xa) fn(py, xa, xb, 1)
+              continue
+            }
+            const xa = Math.max(bx0, xs[i]) - bx0, xb = Math.min(bx1, xs[i + 1]) - bx0
+            if (!(xb > xa)) continue
+            const ia = Math.floor(xa), ib = Math.floor(xb)
+            if (ia < lo) lo = ia
+            if (ib >= hi) hi = ib < bw ? ib + 1 : bw
+            if (ia === ib) cov[ia] += (xb - xa) * weight
+            else { cov[ia] += (ia + 1 - xa) * weight; dif[ia + 1] += weight; dif[ib] -= weight; cov[ib] += (xb - ib) * weight }
+          }
+          continue
+        }
+        // The same, recording the columns written (sparse is only ever set with aa).
         for (let i = 0; i < nx - 1; i++) {
           wind += evenodd ? 1 : ws[i]
           if (!(evenodd ? (wind & 1) === 1 : wind !== 0)) continue
-          if (!aa) {
-            const xa = Math.max(0, Math.round(xs[i])), xb = Math.min(cw, Math.round(xs[i + 1]))
-            if (xb > xa) fn(py, xa, xb, 1)
-            continue
-          }
           const xa = Math.max(bx0, xs[i]) - bx0, xb = Math.min(bx1, xs[i + 1]) - bx0
           if (!(xb > xa)) continue
           const ia = Math.floor(xa), ib = Math.floor(xb)
           if (ia < lo) lo = ia
           if (ib >= hi) hi = ib < bw ? ib + 1 : bw
-          if (ia === ib) cov[ia] += (xb - xa) * weight
-          else { cov[ia] += (ia + 1 - xa) * weight; dif[ia + 1] += weight; dif[ib] -= weight; cov[ib] += (xb - ib) * weight }
+          if (ia === ib) { cov[ia] += (xb - xa) * weight; touch[nt++] = ia }
+          else { cov[ia] += (ia + 1 - xa) * weight; dif[ia + 1] += weight; dif[ib] -= weight; cov[ib] += (xb - ib) * weight; touch[nt++] = ia; touch[nt++] = ia + 1; touch[nt++] = ib }
         }
       }
-      if (hi <= lo) continue
+      if (hi <= lo) { for (let k = 0; k < nt; k++) { const t = touchBuf[k]; cov[t] = 0; dif[t] = 0 } record = false; continue }
+      record = aa && hi - lo > 48
+      // A wide row (a panel, a big shape) reads only the columns its crossings wrote (sparseRow); a narrow one (a
+      // stroke, a glyph-sized shape) every column, where that costs less than sorting them.
+      if (sparse && hi - lo > 2 * nt + 32) { sparseRow(fn, py, bx0, lo, hi, nt, bw); continue }
       // Runs: fully covered pixels together, each edge pixel with its own coverage.
       let acc = 0
       for (let x = lo; x < hi;) {
@@ -294,6 +451,38 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       }
       cov[bw] = 0; dif[bw] = 0
     }
+  }
+  // scanFill's runs for a wide row from the nt columns its crossings wrote (touchBuf): read in order, and between two
+  // of them the coverage holds, so a gap is one run. Each pixel gets the coverage the column-by-column pass gives it
+  // (the same sums, in the same order), for work by crossings rather than by width. Clears what it reads.
+  function sparseRow(fn, py, bx0, lo, hi, nt, bw) {
+    const touched = touchBuf, cov = covBuf, dif = difBuf
+    for (let k = 1; k < nt; k++) { const t = touched[k]; let j = k - 1; while (j >= 0 && touched[j] > t) { touched[j + 1] = touched[j]; j-- } touched[j + 1] = t }
+    let acc = 0, x = lo, runA = -1, runB = -1   // a run of full pixels not yet handed to fn
+    for (let k = 0; k <= nt; k++) {
+      let t
+      if (k < nt) {
+        t = touched[k]
+        if (k > 0 && t === touched[k - 1]) continue
+        if (t >= hi) { cov[t] = 0; dif[t] = 0; continue }
+      } else t = hi
+      // The gap [x, t) at coverage acc, then column t (unless this is the end).
+      for (let seg = 0; seg < 2; seg++) {
+        let a, b, c
+        if (seg === 0) { if (t <= x) continue; a = x; b = t; c = acc }
+        else { if (k === nt) break; acc += dif[t]; c = cov[t] + acc; cov[t] = 0; dif[t] = 0; a = t; b = t + 1 }
+        if (c > 0.996) {
+          if (runB === a) runB = b
+          else { if (runA >= 0) fn(py, bx0 + runA, bx0 + runB, 1); runA = a; runB = b }
+          continue
+        }
+        if (runA >= 0) { fn(py, bx0 + runA, bx0 + runB, 1); runA = -1; runB = -1 }
+        if (c >= 0.004) for (let p = a; p < b; p++) fn(py, bx0 + p, bx0 + p + 1, c)
+      }
+      x = t + 1
+    }
+    if (runA >= 0) fn(py, bx0 + runA, bx0 + runB, 1)
+    cov[bw] = 0; dif[bw] = 0
   }
   // Heapsort of the edge offsets order[0..n) by their top y (edges[o + 1]): in place, no comparator closure.
   function sortByTop(order, n, edges) {
@@ -947,7 +1136,6 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       let condense = 1
       if (maxWidth !== undefined) { maxWidth = Number(maxWidth); if (!(maxWidth > 0)) return; if (width > maxWidth) condense = maxWidth / width }
       const grad = this.__fillGrad, c = this.__fillRgba, alpha = this.__alpha
-      if (!grad && this.__idle(c[3] * alpha)) return
       this.__emBox(textFace.px)
       const ux = x + this.__alignOffset(width * condense), uy = y + this.__baselineOffset()   // the run's origin, user space
       const A = this.__a, D = this.__d
@@ -958,15 +1146,17 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       if (!(k > 0)) return
       const rsx = (upright ? A : k) * condense, rsy = upright ? D : k
       const ox = upright ? this.__e + ux * A : 0, oy = upright ? this.__f + uy * D : 0
-      const n = textNative, f = textFace
-      if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, rsx, rsy, ox, oy, text, textAlpha, textBox)) {
-        const need = textBox[0] * textBox[1]
-        if (need <= textAlpha.length) return   // nothing inked
-        textAlpha = new Uint8Array(Math.max(need, textAlpha.length * 2))
-        if (!n.textRaster(f.id, f.fallback, f.px, textSpacing, rsx, rsy, ox, oy, text, textAlpha, textBox)) return
-      }
-      const w = textBox[0], h = textBox[1], bx = textBox[2], by = textBox[3]
-      const cw = this.canvas.__w, ch = this.canvas.__h, cover = textAlpha
+      // Rastered at the pen's quarter-pixel phase and placed at its whole pixel: the same label again, or moved by
+      // whole pixels, is a copy from the cache.
+      let ix = Math.floor(ox), iy = Math.floor(oy), qx = Math.round((ox - ix) * 4) / 4, qy = Math.round((oy - iy) * 4) / 4
+      if (qx === 1) { ix++; qx = 0 }
+      if (qy === 1) { iy++; qy = 0 }
+      const entry = textEntry(textNative, textFace, textSpacing, rsx, rsy, qx, qy, text)
+      if (!entry) return
+      const w = entry.w, h = entry.h, bx = entry.bx + ix, by = entry.by + iy, cover = entry.A, RGBA = entry.RGBA
+      // Colour emoji are drawn in their own colours, whatever the fill style: only they keep a transparent fill busy.
+      if (!grad && this.__idle(c[3] * alpha) && !RGBA) return
+      const cw = this.canvas.__w, ch = this.canvas.__h
       if (upright) {
         const x0 = Math.max(0, bx), x1 = Math.min(cw, bx + w), y0 = Math.max(0, by), y1 = Math.min(ch, by + h)
         const draw = () => {
@@ -979,6 +1169,12 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
                 grad.__colorAt(inv[0] * (px + 0.5) + inv[2] * (py + 0.5) + inv[4], inv[1] * (px + 0.5) + inv[3] * (py + 0.5) + inv[5], gradPx)
                 compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov / 255, mode)
               } else compositePixel(buf, di, c[0], c[1], c[2], c[3] * alpha * cov / 255, mode)
+            }
+          }
+          if (RGBA) for (let py = y0; py < y1; py++) {
+            for (let px = x0, ri = ((py - by) * w + (x0 - bx)) * 4, di = (py * cw + x0) * 4; px < x1; px++, ri += 4, di += 4) {
+              const a = RGBA[ri + 3]; if (a === 0 || !this.__covers(px, py)) continue
+              compositePixel(buf, di, RGBA[ri], RGBA[ri + 1], RGBA[ri + 2], a * alpha, mode)
             }
           }
         }
@@ -1005,10 +1201,16 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
             const tx = mx - xa, ty = my - ya, xin = xa >= 0, xbin = xa + 1 < w, yin = ya >= 0, ybin = ya + 1 < h
             const cov = (yin ? ((xin ? cover[ya * w + xa] * (1 - tx) : 0) + (xbin ? cover[ya * w + xa + 1] * tx : 0)) * (1 - ty) : 0)
               + (ybin ? ((xin ? cover[(ya + 1) * w + xa] * (1 - tx) : 0) + (xbin ? cover[(ya + 1) * w + xa + 1] * tx : 0)) * ty : 0)
-            if (cov < 0.5 || !this.__covers(px, py)) continue
+            if ((cov < 0.5 && !RGBA) || !this.__covers(px, py)) continue
             const di = (py * cw + px) * 4
-            if (grad) { grad.__colorAt(gx, gy, gradPx); compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov / 255, mode) }
-            else compositePixel(buf, di, c[0], c[1], c[2], c[3] * alpha * cov / 255, mode)
+            if (cov >= 0.5) {
+              if (grad) { grad.__colorAt(gx, gy, gradPx); compositePixel(buf, di, gradPx[0], gradPx[1], gradPx[2], gradPx[3] * alpha * cov / 255, mode) }
+              else compositePixel(buf, di, c[0], c[1], c[2], c[3] * alpha * cov / 255, mode)
+            }
+            if (RGBA) {
+              const a = sampleAt(RGBA, w, h, mx, my, 4, 3)
+              if (a >= 1) compositePixel(buf, di, sampleAt(RGBA, w, h, mx, my, 4, 0), sampleAt(RGBA, w, h, mx, my, 4, 1), sampleAt(RGBA, w, h, mx, my, 4, 2), a * alpha, mode)
+            }
           }
         }
       }
@@ -1230,6 +1432,46 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     __fillGradientSpan(buf, x0, y0, x1, y1, cover = 1) {
       const grad = this.__fillGrad, cw = this.canvas.__w, out = gradPx, alpha = this.__alpha * cover, mode = this.__mode()
       const i0 = inv[0], i1 = inv[1], i2 = inv[2], i3 = inv[3], i4 = inv[4], i5 = inv[5]
+      if (grad.__stops.length) {
+        // Colours from the gradient's table (__lut). A linear gradient's t is linear along a row (the inverse
+        // transform is affine): it steps by the same amount each pixel, and pixels that look up the same entry are
+        // painted as one span (a vertical gradient's whole row, a slanted one's runs).
+        const table = grad.__lut(), n1 = GRADIENT_STEPS - 1, p = grad.__p
+        const index = (t) => (((t < 0 ? 0 : t > 1 ? 1 : t) * n1 + 0.5) | 0) * 4
+        const ldx = p[2] - p[0], ldy = p[3] - p[1], d = ldx * ldx + ldy * ldy
+        if (grad.__kind === 'linear' && d > 0) {
+          const step = (i0 * ldx + i1 * ldy) / d
+          for (let py = y0; py < y1; py++) {
+            const X = x0 + 0.5, Y = py + 0.5, row = py * cw * 4
+            let t = ((i0 * X + i2 * Y + i4 - p[0]) * ldx + (i1 * X + i3 * Y + i5 - p[1]) * ldy) / d
+            if (step === 0) {
+              const i = index(t), a = table[i + 3] * alpha
+              if (a > 0 || mode === 1) paintSpan(buf, row + x0 * 4, row + x1 * 4, table[i], table[i + 1], table[i + 2], a, mode)
+              continue
+            }
+            let px = x0, i = index(t)
+            while (px < x1) {
+              let end = px + 1, j = -1
+              t += step
+              while (end < x1) { j = index(t); if (j !== i) break; end++; t += step }
+              const a = table[i + 3] * alpha
+              if (a > 0 || mode === 1) paintSpan(buf, row + px * 4, row + end * 4, table[i], table[i + 1], table[i + 2], a, mode)
+              px = end; i = j
+            }
+          }
+          return
+        }
+        if (grad.__kind !== 'linear') {
+          for (let py = y0; py < y1; py++) for (let px = x0; px < x1; px++) {
+            const X = px + 0.5, Y = py + 0.5, t = grad.__t(i0 * X + i2 * Y + i4, i1 * X + i3 * Y + i5)
+            const di = (py * cw + px) * 4
+            if (Number.isNaN(t)) { if (mode === 1) compositePixel(buf, di, 0, 0, 0, 0, mode); continue }
+            const i = index(t), a = table[i + 3] * alpha
+            if (a > 0 || mode === 1) compositePixel(buf, di, table[i], table[i + 1], table[i + 2], a, mode)
+          }
+          return
+        }
+      }
       for (let py = y0; py < y1; py++) for (let px = x0; px < x1; px++) {
         grad.__colorAt(i0 * (px + 0.5) + i2 * (py + 0.5) + i4, i1 * (px + 0.5) + i3 * (py + 0.5) + i5, out)
         const a = out[3] * alpha

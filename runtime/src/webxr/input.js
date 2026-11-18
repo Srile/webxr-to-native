@@ -17,12 +17,22 @@ function pose7(out, rec, at) { for (let i = 0; i < 7; i++) out[i] = rec[at + i] 
 // Browser, put the two within 7 degrees). The ray's direction is the same either way; its roll is what differs,
 // and games that read the ray's axes (a palm's facing, a held tool's up) are upside down without this.
 // q' = q * (0, 0, 1, 0): (x, y, z, w) -> (y, -x, w, -z).
+// Only where the runtime's aim has its +X opposite the grip's (Meta's, measured on a Quest 3): which way it is, is
+// read from the two poses (and kept for frames where either is lost), so a runtime whose aim +X already follows the
+// grip's (SteamVR's for the Steam Frame's controllers, bound to the Touch profile) keeps its ray the right way up.
 function rollAim(out) { const x = out[3], y = out[4], z = out[5], w = out[6]; out[3] = y; out[4] = -x; out[5] = w; out[6] = -z }
+// The dot product of two pose7s' +X axes: a quaternion (x, y, z, w) turns +X to (1 - 2(y²+z²), 2(xy + wz), 2(xz - wy)).
+function xDot(a, b) {
+  const ax = 1 - 2 * (a[4] * a[4] + a[5] * a[5]), ay = 2 * (a[3] * a[4] + a[6] * a[5]), az = 2 * (a[3] * a[5] - a[6] * a[4])
+  const bx = 1 - 2 * (b[4] * b[4] + b[5] * b[5]), by = 2 * (b[3] * b[4] + b[6] * b[5]), bz = 2 * (b[3] * b[5] - b[6] * b[4])
+  return ax * bx + ay * by + az * bz
+}
 
 export class InputBridge {
   constructor(hostInput) {
     this.states = [hostInput.left, hostInput.right]
     this.held = [[false, false], [false, false]]  // per hand: trigger, squeeze pressed (the hysteresis)
+    this.flipAim = [true, true]  // per hand: the aim's +X is opposite the grip's (rollAim), as last seen
   }
 
   write(rec) {
@@ -53,8 +63,10 @@ export class InputBridge {
       st.mode = XRHostInputMode.Controller
       pose7(st.grip, rec, b + I.GRIP_POS)
       st.gripValid = rec[b + I.GRIP_VALID] > 0.5
-      pose7(st.targetRay, rec, b + I.AIM_POS); rollAim(st.targetRay)
+      pose7(st.targetRay, rec, b + I.AIM_POS)
       st.targetRayValid = rec[b + I.AIM_VALID] > 0.5
+      if (st.gripValid && st.targetRayValid) this.flipAim[h] = xDot(st.grip, st.targetRay) < 0
+      if (this.flipAim[h]) rollAim(st.targetRay)
       st.palmValid = false
       const values = st.buttonValues, pressed = st.buttonPressed, touched = st.buttonTouched
       for (let i = 0; i < I.BTN_COUNT; i++) {
