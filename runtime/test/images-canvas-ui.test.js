@@ -274,3 +274,47 @@ test('an SVG image is decoded normalised and redrawn from a raster made for the 
   ctx.save(); ctx.translate(4, 16); ctx.rotate(-Math.PI / 2); ctx.drawImage(im, 0, 0, 8, 8); ctx.restore()   // turned, at 2x
   assert.deepEqual(seen.rasters, [2, 0.5]); assert.equal(at(c, 5, 15)[0], 108)
 })
+
+// A lazy-widgets style repaint: the root clips to a small dirty rectangle (after translate(1, 1)), clears the whole
+// canvas, scales, then repaints the whole widget tree, including a rounded-corner clip the size of the panel. The
+// draws are bounded by the clip's box (scanFill's box, __maskClip, __forClipRect), which must not change a pixel:
+// the repaint has to leave the canvas exactly as a full paint of the same frame does.
+test('a repaint clipped to a dirty rect matches a full paint, inside and outside the rect', () => {
+  const g = freshGlobal()
+  const W = 256, H = 128
+  const paint = (ctx, highlight) => {
+    ctx.save(); ctx.scale(1.7, 1.7)
+    ctx.fillStyle = '#1A232A'; ctx.fillRect(0, 0, 150, 75)
+    ctx.save(); ctx.beginPath(); ctx.roundRect(2.5, 2.5, 145, 70, 9); ctx.clip()
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, 150, 75)
+    ctx.fillStyle = highlight ? 'rgba(120, 120, 120, 0.25)' : '#2b3a44'; ctx.fillRect(40.3, 50.2, 37.5, 9.1)
+    ctx.fillStyle = 'red'; ctx.beginPath(); ctx.arc(76, 52, 2.3, 0, Math.PI * 2); ctx.fill()
+    ctx.strokeStyle = '#88aacc'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.roundRect(40.3, 50.2, 37.5, 9.1, 2); ctx.stroke()
+    ctx.restore(); ctx.restore()
+  }
+  // reference: the frame painted whole
+  const [ref, rctx] = canvas(g, W, H)
+  paint(rctx, true)
+  // repaint: the previous frame, then only the dirty rectangle, as lazy-widgets' CanvasViewport.paintToInternal does
+  const [c, ctx] = canvas(g, W, H)
+  paint(ctx, false)
+  const dirty = [67, 84, 66, 18]
+  ctx.save(); ctx.translate(1, 1); ctx.beginPath(); ctx.rect(dirty[0] - 1, dirty[1] - 1, dirty[2], dirty[3]); ctx.clip()
+  ctx.clearRect(0, 0, W, H)
+  ctx.translate(-1, -1)
+  paint(ctx, true)
+  ctx.restore()
+  let inside = 0, outside = 0
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const inRect = x >= dirty[0] && x < dirty[0] + dirty[2] && y >= dirty[1] && y < dirty[1] + dirty[3]
+    if (inRect) { assert.deepEqual(at(c, x, y), at(ref, x, y), `inside the dirty rect at ${x},${y}`); inside++ }
+    else outside++
+  }
+  assert.ok(inside > 1000 && outside > 1000)
+  // outside the rect the old frame survives: its unhighlighted button colour is still there
+  const [old, octx] = canvas(g, W, H); paint(octx, false)
+  for (let y = 0; y < H; y += 3) for (let x = 0; x < W; x += 3) {
+    const inRect = x >= dirty[0] && x < dirty[0] + dirty[2] && y >= dirty[1] && y < dirty[1] + dirty[3]
+    if (!inRect) assert.deepEqual(at(c, x, y), at(old, x, y), `outside the dirty rect at ${x},${y}`)
+  }
+})

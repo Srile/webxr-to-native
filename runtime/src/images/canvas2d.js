@@ -205,8 +205,10 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
   // Inside spans of a filled path, in device pixels: fn(py, x0, x1, cover) with x1 exclusive and cover in (0, 1].
   // With `aa` every pixel row is sampled on four lines with the exact horizontal coverage on each, so edges are
   // antialiased as a browser's are; without it one line through the pixel centres decides whole pixels (clip masks,
-  // clearRect, the copy operator).
-  function scanFill(path, evenodd, cw, ch, fn, aa) {
+  // clearRect, the copy operator). `box` (x0, y0, x1, y1), when given, is the device box the clip lets through:
+  // rows and columns outside it are not rasterized at all, since every span there would be clipped away. A repaint
+  // clips to a small dirty rectangle and then fills whole panels; without it each fill costs the panel's area.
+  function scanFill(path, evenodd, cw, ch, fn, aa, box) {
     let total = 0
     for (let s = 0; s < path.length; s++) total += path[s].length
     if (!total) return
@@ -229,7 +231,10 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       }
     }
     if (!ne) return
-    const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(ch, Math.ceil(maxY))
+    let y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(ch, Math.ceil(maxY))
+    let bx0 = Math.max(0, Math.floor(minX)), bx1 = Math.min(cw, Math.ceil(maxX))
+    if (box) { y0 = Math.max(y0, box[1]); y1 = Math.min(y1, box[3]); bx0 = Math.max(bx0, box[0]); bx1 = Math.min(bx1, box[2]) }
+    if (!(y1 > y0) || !(bx1 > bx0)) return
     if (xsBuf.length < ne) { xsBuf = new Float64Array(Math.max(ne, xsBuf.length * 2)); wsBuf = new Float64Array(xsBuf.length) }
     const xs = xsBuf, ws = wsBuf
     if (orderBuf.length < ne) { orderBuf = new Int32Array(Math.max(ne, orderBuf.length * 2)); activeBuf = new Int32Array(orderBuf.length) }
@@ -237,10 +242,10 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     for (let i = 0; i < ne; i++) order[i] = i * 5
     sortByTop(order, ne, edges)
     let next = 0, na = 0
-    const bx0 = Math.max(0, Math.floor(minX)), bx1 = Math.min(cw, Math.ceil(maxX)), bw = bx1 - bx0
+    const bw = bx1 - bx0
     // cov: each pixel's partly covered share; dif: where full coverage starts and ends, summed along the row. Both
     // are all zero between rows (a row clears what it read).
-    if (aa) { if (!(bw > 0)) return; if (covBuf.length < bw + 2) { covBuf = new Float32Array(Math.max(bw + 2, covBuf.length * 2)); difBuf = new Float32Array(covBuf.length) } }
+    if (aa) { if (covBuf.length < bw + 2) { covBuf = new Float32Array(Math.max(bw + 2, covBuf.length * 2)); difBuf = new Float32Array(covBuf.length) } }
     const cov = covBuf, dif = difBuf, lines = aa ? 4 : 1, weight = 1 / lines
     for (let py = y0; py < y1; py++) {
       let lo = bw, hi = 0
@@ -265,7 +270,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
           wind += evenodd ? 1 : ws[i]
           if (!(evenodd ? (wind & 1) === 1 : wind !== 0)) continue
           if (!aa) {
-            const xa = Math.max(0, Math.round(xs[i])), xb = Math.min(cw, Math.round(xs[i + 1]))
+            const xa = Math.max(bx0, Math.round(xs[i])), xb = Math.min(bx1, Math.round(xs[i + 1]))
             if (xb > xa) fn(py, xa, xb, 1)
             continue
           }
@@ -308,6 +313,12 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
     }
     for (let i = (n >> 1) - 1; i >= 0; i--) sift(i, n)
     for (let end = n - 1; end > 0; end--) { const t = order[0]; order[0] = order[end]; order[end] = t; sift(0, end) }
+  }
+  // A clip of non-overlapping device rects, with their bounds as its box.
+  function rectsClip(rects) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (const r of rects) { if (r[0] < x0) x0 = r[0]; if (r[1] < y0) y0 = r[1]; if (r[2] > x1) x1 = r[2]; if (r[3] > y1) y1 = r[3] }
+    return { kind: 'rects', rects, box: x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : [0, 0, 0, 0] }
   }
   function rectsOverlap(list) {
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
@@ -515,6 +526,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       this.__stack = []   // save() records, reused: __depth of them are live
       this.__depth = 0
       this.__r = new Float64Array(4)   // __rect / a device box: x0, y0, x1, y1
+      this.__canvasBox = [0, 0, 0, 0]   // __clipBox() without a clip
       this.__tbuf = null   // the layer while a draw lands in it (see __layered)
       this.__reset()
     }
@@ -524,7 +536,9 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       this.__alpha = 1
       this.__font = '10px sans-serif'
       this.__opMode = 0   // an index into COMPOSITE_MODES
-      this.__clip = null   // null: the whole canvas. {kind:'rects', rects:[[x0,y0,x1,y1]]} or {kind:'mask', x, y, w, h, bits}
+      // null: the whole canvas. {kind:'rects', rects:[[x0,y0,x1,y1]], box} or {kind:'mask', x, y, w, h, bits, box}; never
+      // changed once made (save() keeps them), and `box` is the device box (x0, y0, x1, y1) it can let paint through.
+      this.__clip = null
       this.textAlign = 'start'; this.textBaseline = 'alphabetic'; this.direction = 'inherit'
       this.letterSpacing = '0px'; this.wordSpacing = '0px'; this.fontKerning = 'auto'
       this.lineWidth = 1; this.lineCap = 'butt'; this.lineJoin = 'miter'; this.miterLimit = 10
@@ -749,7 +763,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       const cw = this.canvas.__w
       // clearRect ignores the composite mode and the fill, but it honours the clip: a repaint clears the whole
       // canvas inside a clip of just the dirty rectangles, and everything outside it has to survive.
-      if (k === 2) { scanFill(this.__quad(x, y, w, h), false, cw, this.canvas.__h, (py, xa, xb) => this.__clipSpans(py, xa, xb, (a, b) => { buf.fill(0, (py * cw + a) * 4, (py * cw + b) * 4) })); return }
+      if (k === 2) { scanFill(this.__quad(x, y, w, h), false, cw, this.canvas.__h, (py, xa, xb) => this.__clipSpans(py, xa, xb, (a, b) => { buf.fill(0, (py * cw + a) * 4, (py * cw + b) * 4) }), false, this.__clipBox()); return }
       const r = this.__r
       this.__forClipRect(r[0], r[1], r[2], r[3], (x0, y0, x1, y1) => {
         for (let py = y0; py < y1; py++) buf.fill(0, (py * cw + x0) * 4, (py * cw + x1) * 4)
@@ -1032,7 +1046,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
           else this.__fillGradientSpan(buf, a, row, b, row + 1, cover)
         }
         // Edge pixels carry their coverage as alpha; the copy operator would leave them translucent, so it fills whole pixels.
-        scanFill(path, evenodd, cw, ch, (py, xa, xb, k) => { row = py; cover = k; this.__clipSpans(py, xa, xb, span) }, mode !== 1)
+        scanFill(path, evenodd, cw, ch, (py, xa, xb, k) => { row = py; cover = k; this.__clipSpans(py, xa, xb, span) }, mode !== 1, this.__clipBox())
       }
       if (this.__fillGrad && !this.__inverse()) return
       if (this.__direct()) { draw(); return }
@@ -1129,7 +1143,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
           const x0 = Math.max(r[0], b[0]), y0 = Math.max(r[1], b[1]), x1 = Math.min(r[2], b[2]), y1 = Math.min(r[3], b[3])
           if (x1 > x0 && y1 > y0) next.push([x0, y0, x1, y1])
         }
-        if (!rectsOverlap(next)) { this.__clip = { kind: 'rects', rects: next }; return }
+        if (!rectsOverlap(next)) { this.__clip = rectsClip(next); return }
       }
       this.__clip = this.__maskClip(this.__path, evenodd)
     }
@@ -1153,17 +1167,20 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const sub of path) for (const p of sub) { minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]); maxX = Math.max(maxX, p[0]); maxY = Math.max(maxY, p[1]) }
       const cw = this.canvas.__w, ch = this.canvas.__h
-      if (!Number.isFinite(minX)) return { kind: 'rects', rects: [] }
-      const x0 = Math.max(0, Math.floor(minX)), y0 = Math.max(0, Math.floor(minY))
-      const x1 = Math.min(cw, Math.ceil(maxX)), y1 = Math.min(ch, Math.ceil(maxY))
-      if (x1 <= x0 || y1 <= y0) return { kind: 'rects', rects: [] }
+      if (!Number.isFinite(minX)) return rectsClip([])
+      // The new clip is the path within the old one, so its mask needs only the box they share: a widget's rounded
+      // corners clipped inside a repaint's dirty rectangle make a mask the size of that rectangle, not of the widget.
+      const cb = this.__clipBox()
+      const x0 = Math.max(cb[0], Math.floor(minX)), y0 = Math.max(cb[1], Math.floor(minY))
+      const x1 = Math.min(cb[2], Math.ceil(maxX)), y1 = Math.min(cb[3], Math.ceil(maxY))
+      if (x1 <= x0 || y1 <= y0) return rectsClip([])
       const w = x1 - x0, h = y1 - y0, bits = new Uint8Array(w * h)
-      scanFill(path, evenodd, cw, ch, (py, xa, xb) => {
-        if (py < y0 || py >= y1) return
+      const box = [x0, y0, x1, y1]
+      scanFill(path, evenodd, cw, ch, (py, xa, xb) => {   // spans already inside the box
         const row = (py - y0) * w
-        for (let x = Math.max(xa, x0), end = Math.min(xb, x1); x < end; x++) if (this.__covers(x, py)) bits[row + x - x0] = 1
-      })
-      return { kind: 'mask', x: x0, y: y0, w, h, bits }
+        for (let x = xa; x < xb; x++) if (this.__covers(x, py)) bits[row + x - x0] = 1
+      }, false, box)
+      return { kind: 'mask', x: x0, y: y0, w, h, bits, box }
     }
     __covers(x, y) {
       const c = this.__clip
@@ -1184,7 +1201,15 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
         }
         return
       }
-      for (let y = y0; y < y1; y++) this.__clipSpans(y, x0, x1, (a, b) => fn(a, y, b, y + 1))
+      // only the mask's own rows: every other row of the rect is outside the clip
+      for (let y = Math.max(y0, c.y), end = Math.min(y1, c.y + c.h); y < end; y++) this.__clipSpans(y, x0, x1, (a, b) => fn(a, y, b, y + 1))
+    }
+    // The device box (x0, y0, x1, y1) the clip can let paint through: everything a draw puts outside it is discarded.
+    __clipBox() {
+      if (this.__clip) return this.__clip.box
+      const b = this.__canvasBox
+      b[2] = this.canvas.__w; b[3] = this.canvas.__h
+      return b
     }
     __clipSpans(y, x0, x1, fn) {
       const c = this.__clip
