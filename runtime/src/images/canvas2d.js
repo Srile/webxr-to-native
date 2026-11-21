@@ -176,16 +176,35 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
       buf[i + 3] = Math.round(oa * 255)
     }
   }
-  // blendSpan's long spans as 32-bit words, out of it so it stays small enough to inline (a stroke paints a span per
-  // edge pixel): an opaque span whole, or the run of transparent pixels a translucent span starts over (they take the
-  // colour as it is). The bytes a Uint8ClampedArray store would write (rounded, clamped). Returns where blendSpan's
+  // blendSpan for a path fill's spans under 8 pixels, where the word fills never apply: the same loop without their
+  // test. A stroke or a small shape paints a span per edge pixel, and blendSpan with the test is too big for V8 to
+  // inline, so each was a call: long thin strokes ran 5-10% slower than main's. fill() calls this one directly for
+  // them (it inlines there); paintSpan and blendSpan are left as they were, since inlining the loop into paintSpan
+  // made it too big to inline where clip masks are walked (a clipped panel UI ~10% slower on a Quest).
+  function blendShort(buf, i, end, r, gg, b, a) {
+    if (a <= 0) return
+    if (a >= 255) { for (; i < end; i += 4) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = 255 } return }
+    const sa = a / 255, ia = 1 - sa, rs = r * sa, gs = gg * sa, bs = b * sa
+    for (; i < end; i += 4) {
+      const da = buf[i + 3]
+      if (da === 0) { buf[i] = r; buf[i + 1] = gg; buf[i + 2] = b; buf[i + 3] = a; continue }
+      const k = (da / 255) * ia, oa = sa + k
+      buf[i] = Math.round((rs + buf[i] * k) / oa)
+      buf[i + 1] = Math.round((gs + buf[i + 1] * k) / oa)
+      buf[i + 2] = Math.round((bs + buf[i + 2] * k) / oa)
+      buf[i + 3] = Math.round(oa * 255)
+    }
+  }
+  // blendSpan's long spans as 32-bit words: an opaque span whole, or the run of transparent pixels a translucent span
+  // starts over (they take the colour as it is). The bytes blendSpan's own stores into the canvas's Uint8Array write:
+  // `x & 255` is exactly a Uint8Array store's conversion (truncated, modulo 256), so a fractional alpha (a translucent
+  // fill at a globalAlpha, a gradient's table) lands as it does pixel by pixel, not rounded. Returns where blendSpan's
   // own loop goes on from: `end` when it painted it all, `i` when it painted nothing.
   function wordRun(buf, i, end, r, gg, b, a) {
     if (!LITTLE_ENDIAN || (buf.byteOffset & 3) !== 0) return i
     let j = end
     if (a < 255) { j = i + 4; while (j < end && buf[j + 3] === 0) j += 4; if (j - i < 32) return i }
-    clampPx[0] = r; clampPx[1] = gg; clampPx[2] = b; clampPx[3] = a
-    words(buf).fill((clampPx[0] | clampPx[1] << 8 | clampPx[2] << 16 | clampPx[3] << 24) >>> 0, i >> 2, j >> 2)
+    words(buf).fill(((r & 255) | (gg & 255) << 8 | (b & 255) << 16 | (a & 255) << 24) >>> 0, i >> 2, j >> 2)
     return j
   }
   // blendSpan for source-over; copy replaces the span, destination-out punches its alpha (the colour is unused) and
@@ -1243,7 +1262,7 @@ export function makeCanvas(g, { EventTargetBase, ImageData, ImageBitmap, newBitm
         const buf = this.__target(), cw = this.canvas.__w, ch = this.canvas.__h, alpha = this.__alpha, mode = this.__mode()
         let row = 0, cover = 1
         const span = (a, b) => {
-          if (solid) paintSpan(buf, (row * cw + a) * 4, (row * cw + b) * 4, solid[0], solid[1], solid[2], solid[3] * alpha * cover, mode)
+          if (solid) { if (mode === 0 && b - a < 8) blendShort(buf, (row * cw + a) * 4, (row * cw + b) * 4, solid[0], solid[1], solid[2], solid[3] * alpha * cover); else paintSpan(buf, (row * cw + a) * 4, (row * cw + b) * 4, solid[0], solid[1], solid[2], solid[3] * alpha * cover, mode) }
           else this.__fillGradientSpan(buf, a, row, b, row + 1, cover)
         }
         // Edge pixels carry their coverage as alpha; the copy operator would leave them translucent, so it fills whole pixels.

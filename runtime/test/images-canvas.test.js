@@ -310,6 +310,22 @@ test('path fill: many edges, nonzero vs evenodd, translucent spans blend exactly
   assert.deepEqual(px(c.__rgba, 8, 0, 0), [255, 255, 255, 255]); assert.deepEqual(px(c.__rgba, 8, 3, 3), [0, 0, 0, 0])
 })
 
+test('a wide span over transparent pixels (filled as 32-bit words) stores what a narrow one does, pixel by pixel', () => {
+  const g = freshGlobal()
+  const c = new g.OffscreenCanvas(64, 4); const ctx = c.getContext('2d')
+  // alpha 0.289 * 255 * 0.51 = 37.59: the canvas's Uint8Array store keeps 37, as blendSpan does a pixel at a time
+  ctx.fillStyle = 'rgba(97, 96, 237, 0.289)'; ctx.globalAlpha = 0.51
+  ctx.fillRect(0, 0, 48, 1)   // wide: words
+  ctx.fillRect(0, 1, 3, 1)    // narrow: pixel by pixel
+  ctx.beginPath(); ctx.rect(0, 2, 48, 1); ctx.fill()   // a path's inside span
+  assert.deepEqual(px(c.__rgba, 64, 20, 0), px(c.__rgba, 64, 1, 1))
+  assert.deepEqual(px(c.__rgba, 64, 20, 2), px(c.__rgba, 64, 1, 1))
+  assert.equal(px(c.__rgba, 64, 1, 1)[3], 37)
+  // opaque, the words are the colour itself
+  ctx.globalAlpha = 1; ctx.fillStyle = '#123456'; ctx.fillRect(0, 3, 64, 1)
+  assert.deepEqual(px(c.__rgba, 64, 40, 3), [0x12, 0x34, 0x56, 255])
+})
+
 test('fillStyle colours are parsed once and shared; save/restore records are reused', () => {
   const g = freshGlobal()
   const a = new g.OffscreenCanvas(2, 2).getContext('2d'), b = new g.OffscreenCanvas(2, 2).getContext('2d')
