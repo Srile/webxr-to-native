@@ -8,7 +8,21 @@ import { domError } from './pixels.js'
 
 const GENERIC = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-sans-serif', 'ui-serif', 'ui-monospace', 'ui-rounded', 'math', 'emoji', 'fangsong'])
 const unquote = (s) => String(s).trim().replace(/^(['"])(.*)\1$/, '$2').trim()
-const weightOf = (w) => { w = String(w ?? 'normal').trim(); return w === 'bold' ? 700 : w === 'normal' ? 400 : (parseFloat(w) || 400) }
+// A FontFace weight descriptor as [lo, hi]: one weight ('normal', 'bold', '300'), or a variable face's range ('100 900';
+// 'auto' is any weight).
+const weightOf1 = (w) => (w === 'bold' ? 700 : w === 'normal' ? 400 : Math.min(1000, Math.max(1, parseFloat(w) || 400)))
+const weightRange = (w) => {
+  const s = String(w ?? 'normal').trim().toLowerCase()
+  if (s === 'auto') return [1, 1000]
+  const parts = s.split(/\s+/).filter(Boolean).slice(0, 2).map(weightOf1)
+  return parts.length === 2 ? [Math.min(parts[0], parts[1]), Math.max(parts[0], parts[1])] : [parts[0] ?? 400, parts[0] ?? 400]
+}
+// How far a face's weight (range) is from the one asked for: 0 inside the range.
+const weightDistance = ([lo, hi], weight) => (weight < lo ? lo - weight : weight > hi ? weight - hi : 0)
+// The weight a face draws at. The host draws a variable face's default outlines (it sets no variation axis), so a
+// range face draws at its default instance: taken as the weight in its range nearest 400 (where variable faces put
+// their default). Text asking for more than that is emboldened from there (resolveFont's bold), as for a regular face.
+const drawnWeight = ([lo, hi]) => Math.min(hi, Math.max(lo, 400))
 
 export function makeFonts(g, { EventTargetBase }) {
   const img = () => g.__native && g.__native.img
@@ -91,7 +105,7 @@ export function makeFonts(g, { EventTargetBase }) {
   function pick(list, weight, italic) {
     let best = null, score = Infinity
     for (const f of list) {
-      const s = Math.abs(weightOf(f.weight) - weight) + ((f.style !== 'normal') !== italic ? 1000 : 0)
+      const s = weightDistance(weightRange(f.weight), weight) + ((f.style !== 'normal') !== italic ? 1000 : 0)
       if (s < score) { score = s; best = f }
     }
     return best
@@ -106,7 +120,7 @@ export function makeFonts(g, { EventTargetBase }) {
     for (const fam of p.families) {
       const key = fam.toLowerCase()
       const list = byFamily.get(key)
-      if (list && list.length) { const face = pick(list, p.weight, p.italic); id = face.__id; faceWeight = weightOf(face.weight); break }
+      if (list && list.length) { const face = pick(list, p.weight, p.italic); id = face.__id; faceWeight = drawnWeight(weightRange(face.weight)); break }
       if (GENERIC.has(key)) break
     }
     // bold: how much heavier the text asks to be than the face it gets (0..1 of a regular-to-bold step), drawn by
