@@ -211,8 +211,13 @@ void init(const v8::FunctionCallbackInfo<v8::Value>& a) {
 #define STEAM_OR_FAIL if (!g_ok) { a.GetReturnValue().SetNull(); return; }
 void authTicket(const v8::FunctionCallbackInfo<v8::Value>& a) {
   v8::Isolate* iso = a.GetIsolate();
-  if (!g_ok || !a[1]->IsFunction()) { if (a[1]->IsFunction()) (void)a[1].As<v8::Function>()->Call(iso->GetCurrentContext(), v8::Undefined(iso), 1, std::vector<v8::Local<v8::Value>>{v8::Null(iso)}.data()); return; }
+  if (!a[1]->IsFunction()) return;
+  const auto fail = [&] { v8::Local<v8::Value> none = v8::Null(iso); (void)a[1].As<v8::Function>()->Call(iso->GetCurrentContext(), v8::Undefined(iso), 1, &none); };
+  if (!g_ok) { fail(); return; }
   const uint32_t h = api.ticket(g_user, bind::string(a, 0).c_str());
+  // k_HAuthTicketInvalid (0): no ticket (offline, not logged on), and no GetTicketForWebApiResponse_t will come for
+  // it. Answered now, never kept under 0, where a login flow would wait forever and the next failure would replace it.
+  if (h == 0) { fail(); return; }
   g_tickets[h].Reset(iso, a[1].As<v8::Function>());
 }
 void friends(const v8::FunctionCallbackInfo<v8::Value>& a) {
