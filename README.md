@@ -372,7 +372,7 @@ ANGLE slice, plus 10 to 17 GB of checkouts. Each archive carries the licences of
 npm run test:runtime                                   # the JS runtime against fake natives (node --test)
 cmake -S host -B build-tests -G Ninja -DHOST_TESTS=ON && ninja -C build-tests
 # no Ninja on PATH? the SDK's: -DCMAKE_MAKE_PROGRAM="$(ls tools/sdk/android/cmake/*/bin/ninja)"
-for t in json_test loop_test audio_test image_test gl_queue_test storage_test; do build-tests/$t; done
+for t in json_test loop_test audio_test image_test gl_queue_test render_models_test storage_test; do build-tests/$t; done
 node tools/test.mjs                                    # on a headset: every app in apps/ against its expected.png
 ```
 

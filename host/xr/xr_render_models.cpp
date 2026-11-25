@@ -78,18 +78,28 @@ void XrRenderModels::refresh() {
   if (XR_FAILED(r)) { HOST_LOGW("render models: enumerate %d", (int)r); return; }
   std::vector<XrRenderModelIdEXT> ids(n);
   if (n && XR_FAILED(r = pfnEnumerate_(sess_, &ei, n, &n, ids.data()))) { HOST_LOGW("render models: enumerate %d", (int)r); return; }
-  // The same ids keep their models (and the page its loaded meshes); the generation moves only when the set changes.
-  std::vector<RenderModelEntry> next;
+  // The same ids keep their models (and the page its loaded meshes) and their slots: the ones still listed stay in
+  // their old order, whatever order the runtime lists them in now, and new ones go after them. The page's views over
+  // the pose record are by slot (render-models.js), so a model that moved to another slot without a new generation
+  // would animate on the other controller: the generation moves when the set changes or any slot does.
+  const auto listed = [&](uint64_t id) { return std::any_of(ids.begin(), ids.end(), [&](XrRenderModelIdEXT x) { return (uint64_t)x == id; }); };
+  std::vector<RenderModelEntry> next, gone;
   bool changed = false;
+  for (size_t k = 0; k < models_.size(); ++k) {
+    RenderModelEntry& e = models_[k];
+    if (!listed(e.id) || (int)next.size() >= kMaxModels) { gone.push_back(std::move(e)); continue; }
+    if (next.size() != k) changed = true;   // one before it went: its slot moves down
+    next.push_back(std::move(e));
+  }
   for (uint32_t i = 0; i < n && (int)next.size() < kMaxModels; ++i) {
-    auto it = std::find_if(models_.begin(), models_.end(), [&](const RenderModelEntry& e) { return e.id == (uint64_t)ids[i]; });
-    if (it != models_.end()) { next.push_back(std::move(*it)); models_.erase(it); continue; }
-    RenderModelEntry e; e.id = (uint64_t)ids[i];
+    const uint64_t id = (uint64_t)ids[i];
+    if (std::any_of(next.begin(), next.end(), [&](const RenderModelEntry& e) { return e.id == id; })) continue;
+    RenderModelEntry e; e.id = id;
     if (load(e)) { next.push_back(std::move(e)); changed = true; }
     else { if (e.space) xrDestroySpace(e.space); if (e.asset) pfnDestroyAsset_(e.asset); if (e.model) pfnDestroy_(e.model); }
   }
-  if (!models_.empty()) changed = true;
-  release();
+  if (!gone.empty()) changed = true;
+  models_ = std::move(gone); release();   // destroys the ones no longer listed
   models_ = std::move(next);
   // A hand's model may move to the other hand without changing ids (handed controllers report it once known).
   XrInteractionRenderModelTopLevelUserPathGetInfoEXT ti{XR_TYPE_INTERACTION_RENDER_MODEL_TOP_LEVEL_USER_PATH_GET_INFO_EXT};
