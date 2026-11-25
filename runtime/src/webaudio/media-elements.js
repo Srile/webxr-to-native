@@ -5,9 +5,13 @@
 // clips. No streaming, so a long track starts once it has decoded; no timeupdate events. A srcObject (a MediaStream:
 // a WebRTC voice, a microphone) plays live through a MediaStreamAudioSourceNode while the element plays.
 //
-// Events: play, loadedmetadata, playing, pause, ended, error (each also through its on<type> property).
+// Only <audio> (HTMLAudioElement, and new Audio()): a <video> keeps rejecting play(), since playing its sound with
+// no picture is worse than the fallback a page runs when video can't play.
+//
+// Events: play, loadedmetadata, playing, pause, ended, error, dispatched on the element (dispatchEvent also calls
+// its on<type> property).
 export function installMediaElements(g, AudioContext) {
-  const proto = g.HTMLMediaElement && g.HTMLMediaElement.prototype
+  const proto = g.HTMLAudioElement && g.HTMLAudioElement.prototype
   if (!proto || !AudioContext) return
   let ctx = null
   const context = () => {
@@ -32,12 +36,12 @@ export function installMediaElements(g, AudioContext) {
     return p
   }
   const absolute = (src) => { try { return new URL(src, g.location && g.location.href).href } catch { return src } }
+  // dispatchEvent runs the listeners and the on<type> handler once each.
   const fire = (el, type) => {
     try { el.dispatchEvent(new g.Event(type)) } catch (e) { g.__native?.log?.(2, `audio ${type}: ${e}`) }
-    const on = el['on' + type]
-    if (typeof on === 'function') try { on.call(el, new g.Event(type)) } catch (e) { g.__native?.log?.(2, `audio on${type}: ${e}`) }
   }
-  const media = (el) => el.__media || (el.__media = { node: null, gain: null, buffer: null, startedAt: 0, token: 0, volume: 1, muted: false, time: 0 })
+  // url: the source the buffer and time belong to; another src starts from its beginning.
+  const media = (el) => el.__media || (el.__media = { node: null, gain: null, buffer: null, url: null, startedAt: 0, token: 0, volume: 1, muted: false, time: 0 })
   const level = (m) => (m.muted ? 0 : Math.max(0, Math.min(1, m.volume)))
   const stop = (m) => {
     const node = m.node
@@ -121,6 +125,11 @@ export function installMediaElements(g, AudioContext) {
     const src = this.src || (typeof this.getAttribute === 'function' ? this.getAttribute('src') : '') || ''
     if (!src) return Promise.reject(new g.DOMException('The element has no supported sources.', 'NotSupportedError'))
     const url = absolute(src)
+    // Already playing this source: nothing to do, as in a browser (pages call play() on every tap to unlock audio).
+    // A src set since then plays the new source instead, from its start: here setting src doesn't stop playback, as
+    // a browser's load algorithm would, so play() is where the switch happens.
+    if (!this.paused && m.node && url === m.url) return Promise.resolve()
+    if (url !== m.url) { m.url = url; m.buffer = null; m.time = 0 }
     this.currentSrc = url
     const token = ++m.token
     stop(m)
@@ -149,7 +158,7 @@ export function installMediaElements(g, AudioContext) {
   proto.load = function load() {
     const m = media(this)
     m.token++
-    stop(m); m.buffer = null; m.time = 0
+    stop(m); m.buffer = null; m.url = null; m.time = 0
     this.paused = true; this.readyState = 0
   }
 }

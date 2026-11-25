@@ -170,6 +170,12 @@ void Worker::run() {
     bind::fn(ctx, n, "postMessage", wPostMessage, ext); bind::fn(ctx, n, "onMessage", wOnMessage, ext); bind::fn(ctx, n, "setTimer", wSetTimer, ext); bind::fn(ctx, n, "clearTimer", wClearTimer, ext);
     bind::fn(ctx, n, "now", wNow); bind::fn(ctx, n, "log", wLog); bind::fn(ctx, n, "assetRead", wAssetRead); bind::fn(ctx, n, "assetMime", wAssetMime); bind::fn(ctx, n, "close", wClose, ext); bind::fn(ctx, n, "fetch", wFetch, ext);
     bind::setStr(ctx, n, "url", url); bind::setStr(ctx, n, "origin", g_svc->config->at("web").s("origin", "https://app.local")); bind::setStr(ctx, n, "userAgent", "webxr-host worker");
+    {  // web.remote: the same-origin prefixes fetched from the network, as in the page (fetch/index.js)
+      const Json& remote = g_svc->config->at("web").at("remote");
+      v8::Local<v8::Array> list = v8::Array::New(iso); uint32_t k = 0;
+      if (remote.type == Json::Array) for (const Json& p : remote.arr) if (p.type == Json::String) list->Set(ctx, k++, bind::str(iso, p.str)).Check();
+      bind::set(ctx, n, "remote", list);
+    }
     if (hasInit) { v8::Local<v8::Value> v; if (deserialize(iso, ctx, init).ToLocal(&v)) bind::set(ctx, n, "init", v); init = Msg(); }
     installWasmInterp(ctx, n, *g_svc);
 #ifdef HOST_V8_INTL

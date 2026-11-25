@@ -435,7 +435,9 @@ export function install(g) {
   // misc globals
   g.structuredClone = (v, opts) => n.clone(v)
   g.atob = atob; g.btoa = btoa
-  g.alert = (m) => n.log(2, `alert: ${m}`); g.confirm = () => true; g.prompt = () => null; g.open = () => { n.log(2, 'window.open ignored'); return null }; g.close = () => { n.loop?.exit?.() }  // the app's only window: closing it quits, as a native app does; g.focus = () => {}; g.blur = () => {}; g.print = () => {}; g.stop = () => {}; g.scrollTo = () => {}; g.scroll = () => {}; g.scrollBy = () => {}; g.moveTo = () => {}; g.resizeTo = () => {}; g.postMessage = (data) => { g.setTimeout(() => g.dispatchEvent(new ev.MessageEvent('message', { data, origin: g.origin, source: g })), 0) }
+  // close(): the app's only window, so closing it quits, as a native app does
+  g.alert = (m) => n.log(2, `alert: ${m}`); g.confirm = () => true; g.prompt = () => null; g.open = () => { n.log(2, 'window.open ignored'); return null }; g.close = () => { n.loop?.exit?.() }
+  g.focus = () => {}; g.blur = () => {}; g.print = () => {}; g.stop = () => {}; g.scrollTo = () => {}; g.scroll = () => {}; g.scrollBy = () => {}; g.moveTo = () => {}; g.resizeTo = () => {}; g.postMessage = (data) => { g.setTimeout(() => g.dispatchEvent(new ev.MessageEvent('message', { data, origin: g.origin, source: g })), 0) }
   g.getComputedStyle = (el) => computedStyle(el); g.matchMedia = (q) => new MediaQueryList(String(q)); g.getSelection = () => g.document.getSelection()
   g.devicePixelRatio = 1; g.innerWidth = 1280; g.innerHeight = 800; g.outerWidth = 1280; g.outerHeight = 800; g.screenX = 0; g.screenY = 0; g.scrollX = 0; g.scrollY = 0; g.pageXOffset = 0; g.pageYOffset = 0
   // The window, from native: its size in CSS pixels, the device pixel ratio, its framebuffer in pixels and the screen's

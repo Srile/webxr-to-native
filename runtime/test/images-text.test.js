@@ -119,3 +119,27 @@ test('fillText grows its coverage scratch for large text and draws nothing for b
   calls.raster.length = 0
   ctx.fillText('', 0, 0); assert.equal(calls.raster.length, 0)
 })
+
+test('a variable face (weight "100 900") draws normal text as it is and bold emboldened, and matches weights inside its range', async () => {
+  const { g, calls } = textGlobal()
+  const variable = new g.FontFace('Var', new Uint8Array(40), { weight: '100 900' })
+  const regular = new g.FontFace('Reg', new Uint8Array(41))
+  await Promise.all([variable.loaded, regular.loaded]); g.document.fonts.add(variable).add(regular)
+  const inked = (font) => {
+    const c = new g.OffscreenCanvas(64, 32), ctx = c.getContext('2d')
+    ctx.font = font; ctx.fillStyle = '#000'; ctx.fillText('ab', 8, 24)
+    let n = 0; for (let i = 3; i < c.__rgba.length; i += 4) if (c.__rgba[i]) n++
+    return n
+  }
+  const plain = inked('20px Reg')
+  assert.equal(inked('20px Var'), plain, 'normal-weight text in a variable face gets no synthetic bold')
+  assert.equal(inked('400 20px Var'), plain)
+  assert.ok(inked('bold 20px Var') > plain, 'bold is drawn bolder (the host draws the default instance)')
+  assert.equal(inked('bold 20px Var'), inked('bold 20px Reg'))
+  // Matching: 500 is inside "100 600", so that face beats a static bold one (it read as weight 100 before).
+  const fam = [new g.FontFace('Fam', new Uint8Array(42), { weight: '100 600' }), new g.FontFace('Fam', new Uint8Array(43), { weight: 'bold' })]
+  await Promise.all(fam.map((f) => f.loaded)); for (const f of fam) g.document.fonts.add(f)
+  const ctx = new g.OffscreenCanvas(8, 8).getContext('2d')
+  ctx.font = '500 12px Fam'; ctx.measureText('a'); assert.equal(calls.measure.at(-1).font, fam[0].__id)
+  ctx.font = '800 12px Fam'; ctx.measureText('a'); assert.equal(calls.measure.at(-1).font, fam[1].__id)
+})

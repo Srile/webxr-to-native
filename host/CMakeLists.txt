@@ -509,6 +509,9 @@ if((IOS OR CMAKE_SYSTEM_NAME STREQUAL "visionOS") AND NOT HOST_TESTS)
 endif()
 
 if(HOST_TESTS)
+  # The tests check with assert(), so NDEBUG must not reach them: libwebp's CMakeLists makes Release the default
+  # build type (in the cache, for the whole project) and Release defines NDEBUG.
+  add_compile_options(-UNDEBUG)
   add_executable(json_test tests/json_test.cpp core/json.cpp)
   target_include_directories(json_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_executable(loop_test tests/loop_test.cpp core/loop.cpp)
@@ -527,6 +530,10 @@ if(HOST_TESTS)
   add_executable(image_test tests/image_test.cpp img/decode.cpp)
   target_include_directories(image_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb)
   target_link_libraries(image_test host_webp host_web_features)
+  # The runtime's controller models (xr.renderModels): slots and generations over a fake OpenXR runtime.
+  add_executable(render_models_test tests/render_models_test.cpp xr/xr_render_models.cpp)
+  target_include_directories(render_models_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(render_models_test SYSTEM PRIVATE ${TP}/openxr/include)
   # WP-26: the SQLite store under IndexedDB and the Cache API (no V8), when tools/setup-storage.sh has fetched SQLite.
   if(EXISTS ${TP}/sqlite/sqlite3.c)
     host_sqlite_library()
