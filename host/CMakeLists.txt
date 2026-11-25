@@ -509,6 +509,9 @@ if((IOS OR CMAKE_SYSTEM_NAME STREQUAL "visionOS") AND NOT HOST_TESTS)
 endif()
 
 if(HOST_TESTS)
+  # The tests check with assert(), so NDEBUG must not reach them: libwebp's CMakeLists makes Release the default
+  # build type (in the cache, for the whole project) and Release defines NDEBUG.
+  add_compile_options(-UNDEBUG)
   add_executable(json_test tests/json_test.cpp core/json.cpp)
   target_include_directories(json_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_executable(loop_test tests/loop_test.cpp core/loop.cpp)
