@@ -16,3 +16,24 @@ test('Worker wraps __native.worker and routes messages/ports', async () => {
   // blob worker source
   const b = new g.Blob(['postMessage(1)'], { type: 'text/javascript' }); new g.Worker(g.URL.createObjectURL(b)); assert.equal(spawned[1].src, 'postMessage(1)')
 })
+
+// The worker prelude (bundled as assets/host-worker.js) in a context of its own, over a fake worker __native: a
+// host.json web.remote prefix is fetched from the network in a worker too, the rest from the packed files.
+test('in a worker, web.remote prefixes go to the network and other same-origin URLs to the packed files', async () => {
+  const { buildSync } = await import('esbuild'); const vm = await import('node:vm')
+  const prelude = buildSync({ entryPoints: [new URL('../src/workers/worker-global.js', import.meta.url).pathname], bundle: true, format: 'iife', write: false, platform: 'neutral', logLevel: 'silent' }).outputFiles[0].text
+  const ctx = vm.createContext({ setTimeout })
+  vm.runInContext(`
+    const bytes = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0)).buffer
+    globalThis.nets = []; globalThis.reads = []
+    globalThis.__native = {
+      now: () => 0, setTimer: (ms, rep, cb) => { setTimeout(cb, ms); return 1 }, clearTimer() {}, close() {}, log() {}, postMessage() {}, onMessage() {},
+      assetRead: (p) => { reads.push(p); return p === 'data.json' ? bytes('{"packed":true}') : null }, assetMime: () => 'application/json',
+      fetch: (m, u, h, b, cb) => { nets.push(u); cb(200, 'OK', [['content-type', 'application/json']], bytes('{"remote":true}'), null) },
+      url: 'https://app.local/assets/w.js', origin: 'https://app.local', userAgent: 'w', remote: ['/api/'],
+    }`, ctx)
+  vm.runInContext(prelude, ctx)
+  assert.deepEqual({ ...await vm.runInContext("fetch('/api/score').then((r) => r.json())", ctx) }, { remote: true })
+  assert.deepEqual({ ...await vm.runInContext("fetch('/data.json').then((r) => r.json())", ctx) }, { packed: true })
+  assert.deepEqual([...ctx.nets], ['https://app.local/api/score']); assert.deepEqual([...ctx.reads], ['data.json'])
+})

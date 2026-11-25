@@ -12,7 +12,7 @@ import { install as installIntl } from '../intl/index.js'
 import { install as installStorage } from '../storage/index.js'
 const g = globalThis; const n = g.__native
 // A minimal shim of the loop/assets/net/store/log/config/info surface the shared fetch module expects.
-g.__native = { loop: { now: n.now, setTimer: n.setTimer, clearTimer: n.clearTimer, postTask: (cb) => n.setTimer(0, false, cb), onFrame() {}, exit: n.close }, assets: { read: n.assetRead, readText: (p) => { const b = n.assetRead(p); return b == null ? null : new TextDecoder().decode(new Uint8Array(b)) }, exists: (p) => n.assetRead(p) != null, mime: n.assetMime }, net: { fetch: n.fetch }, store: null, storage: n.storage, clone: (v) => v, log: n.log, config: { web: { origin: n.origin } }, info: { userAgent: n.userAgent }, _raw: n }
+g.__native = { loop: { now: n.now, setTimer: n.setTimer, clearTimer: n.clearTimer, postTask: (cb) => n.setTimer(0, false, cb), onFrame() {}, exit: n.close }, assets: { read: n.assetRead, readText: (p) => { const b = n.assetRead(p); return b == null ? null : new TextDecoder().decode(new Uint8Array(b)) }, exists: (p) => n.assetRead(p) != null, mime: n.assetMime }, net: { fetch: n.fetch }, store: null, storage: n.storage, clone: (v) => v, log: n.log, config: { web: { origin: n.origin, remote: n.remote ?? [] } }, info: { userAgent: n.userAgent }, _raw: n }
 Object.assign(g, ev)
 g.self = g; g.window = undefined
 g.location = { href: n.url, origin: n.origin, protocol: n.origin.split(':')[0] + ':', host: n.origin.replace(/^https?:\/\//, ''), hostname: n.origin.replace(/^https?:\/\//, '').split(':')[0], pathname: '/', search: '', hash: '', toString: () => n.url }
