@@ -1,6 +1,7 @@
 // The ONE translation unit that compiles stb_truetype.
 #include "img/text.h"
 #include "img/decode.h"
+#include "core/log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -50,13 +51,20 @@ bool readFile(const char* path, std::vector<uint8_t>& out);
 
 // What neither the page's font nor the sans-serif face draws, from the platform's other faces in turn: symbols
 // (✓ ⌫ ✦ ♡; ♥), then CJK (the Simplified Chinese member of a collection). Each is read the first time a code point
-// misses every face before it (Android's CJK collection is 20 MB).
-struct Tier { const char* paths[4]; const char* face; };
+// misses every face before it (Android's CJK collection is 20 MB, read on the JS thread and kept). An emoji tries
+// the colour emoji font before a tier marked afterEmoji (CJK), which it is almost never in: the first emoji drawn
+// would otherwise read the CJK collection only to miss in it (shape below).
+struct Tier { const char* paths[4]; const char* face; bool afterEmoji; };
 const Tier kTiers[] = {
-  {{"/system/fonts/NotoSansSymbols-Regular-Subsetted.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Apple Symbols.ttf", "C:\\Windows\\Fonts\\seguisym.ttf"}, nullptr},
-  {{"/system/fonts/NotoSansSymbols-Regular-Subsetted2.ttf", nullptr, nullptr, nullptr}, nullptr},
-  {{"/system/fonts/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/System/Library/Fonts/PingFang.ttc", "C:\\Windows\\Fonts\\msyh.ttc"}, "Noto Sans CJK SC"},
+  {{"/system/fonts/NotoSansSymbols-Regular-Subsetted.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Apple Symbols.ttf", "C:\\Windows\\Fonts\\seguisym.ttf"}, nullptr, false},
+  {{"/system/fonts/NotoSansSymbols-Regular-Subsetted2.ttf", nullptr, nullptr, nullptr}, nullptr, false},
+  {{"/system/fonts/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/System/Library/Fonts/PingFang.ttc", "C:\\Windows\\Fonts\\msyh.ttc"}, "Noto Sans CJK SC", true},
 };
+// The blocks emoji live in: Miscellaneous Technical (⌚ ⏩), Miscellaneous Symbols and Dingbats (☀ ⚽ ✅), the
+// arrows and shapes with ⬛ ⭐ ⭕, and the supplementary emoji blocks (U+1F000-1FAFF, regional indicators included).
+bool emojiBlock(uint32_t c) {
+  return (c >= 0x1F000 && c <= 0x1FAFF) || (c >= 0x2300 && c <= 0x23FF) || (c >= 0x2600 && c <= 0x27BF) || (c >= 0x2B00 && c <= 0x2BFF);
+}
 constexpr int kTierCount = (int)(sizeof(kTiers) / sizeof(kTiers[0]));
 int g_tier[kTierCount] = {-2, -2, -2};
 
@@ -70,7 +78,7 @@ const Face* tierFace(int t) {
       if (!path || !readFile(path, bytes)) continue;
       int offset = kTiers[t].face ? stbtt_FindMatchingFont(bytes.data(), kTiers[t].face, STBTT_MACSTYLE_DONTCARE) : -1;
       if (offset < 0) offset = stbtt_GetFontOffsetForIndex(bytes.data(), 0);
-      if ((g_tier[t] = addFace(std::move(bytes), offset, err)) >= 0) break;
+      if ((g_tier[t] = addFace(std::move(bytes), offset, err)) >= 0) { HOST_LOGI("text: fallback face %s read", path); break; }
     }
   }
   return face(g_tier[t]);
@@ -240,11 +248,25 @@ bool shape(int font, int fallback, const uint16_t* s, size_t n) {
     if (gi == 0 && fb) { int fi = stbtt_FindGlyphIndex(&fb->info, (int)c); if (fi != 0) { g_run.push_back({fb, fi}); continue; } }
     if (gi == 0 && (c == 0x200D || (c >= 0xFE00 && c <= 0xFE0F))) continue;  // joiners and variation selectors: nothing to draw
     if (gi == 0 && c > 0x20) {
-      const Face* x = nullptr; int xi = 0;
-      for (int t = 0; t < kTierCount && !xi; ++t) if ((x = tierFace(t))) xi = stbtt_FindGlyphIndex(&x->info, (int)c);
-      if (xi) { g_run.push_back({x, xi}); continue; }
-      ColorGlyph cg;
-      if (ColorFont* cf = colorFont()) if (int ci = colorIndex(*cf, c); ci && colorLocate(*cf, ci, cg)) { g_run.push_back({nullptr, ci, true}); continue; }
+      const auto inTier = [&](int t) {
+        const Face* x = tierFace(t); const int xi = x ? stbtt_FindGlyphIndex(&x->info, (int)c) : 0;
+        if (xi) g_run.push_back({x, xi});
+        return xi != 0;
+      };
+      const auto inColor = [&] {
+        ColorGlyph cg; ColorFont* cf = colorFont(); const int ci = cf ? colorIndex(*cf, c) : 0;
+        if (ci && colorLocate(*cf, ci, cg)) { g_run.push_back({nullptr, ci, true}); return true; }
+        return false;
+      };
+      // The tiers in turn, the colour font last; for an emoji, the colour font before the tiers marked afterEmoji.
+      const bool emoji = emojiBlock(c);
+      bool found = false, colorTried = false;
+      for (int t = 0; t < kTierCount && !found; ++t) {
+        if (emoji && kTiers[t].afterEmoji && !colorTried) { colorTried = true; if ((found = inColor())) break; }
+        found = inTier(t);
+      }
+      if (!found && !colorTried) found = inColor();
+      if (found) continue;
     }
     g_run.push_back({p, gi});
   }
