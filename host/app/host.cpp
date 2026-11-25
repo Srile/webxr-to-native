@@ -225,7 +225,8 @@ bool Host::xrBegin(const Json& opts, Json& out) {
   int w = xr_.swapchainWidth(); if (d.arraySize == 1) w /= 2;
   num("width", d.arraySize == 1 ? xr_.swapchainWidth() : w); num("height", xr_.swapchainHeight()); num("arraySize", xr_.swapchainArraySize()); num("rate", xr_.refreshRate()); num("viewCount", xr_.viewCount()); num("depthTexture", xr_.swapchainDepthTexture()); num("format", (double)xr_.swapchainFormat());
   Json rates; rates.type = Json::Array; for (float r : xr_.refreshRates()) { Json j; j.type = Json::Number; j.num = r; rates.arr.push_back(j); } out.obj["rates"] = rates;
-  float bw = 0, bd = 0; bool hasB = xr_.stageBounds(bw, bd); flag("hasStage", xr_.hasStage()); num("stageWidth", hasB ? bw : 0); num("stageDepth", hasB ? bd : 0); flag("hands", xr_.hasHandTracking());
+  // hasStage: bounded-floor, offered only when the stage is the base (OpenXrDevice::boundedFloor).
+  float bw = 0, bd = 0; const bool bounded = xr_.boundedFloor(), hasB = bounded && xr_.stageBounds(bw, bd); flag("hasStage", bounded); num("stageWidth", hasB ? bw : 0); num("stageDepth", hasB ? bd : 0); flag("hands", xr_.hasHandTracking());
   HOST_LOGI("xr begin: %dx%d x%d", xr_.swapchainWidth(), xr_.swapchainHeight(), xr_.swapchainArraySize());
   HOST_LOGI("invalidation: acquired colour at frame start %s; XRWebGLLayer depth at frame end %s (host.json xr.invalidate)", invalidateAcquire_ ? "on" : "off", invalidateAcquire_ ? "on" : "off");
   return true;

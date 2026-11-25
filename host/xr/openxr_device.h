@@ -105,8 +105,13 @@ class OpenXrDevice {
 
   // Spaces and bounds
   bool hasStage() const { return stageSpace_ != XR_NULL_HANDLE; }
-  // The frame's base space is at floor level: the stage, or local-floor where host.json picked it.
+  // The frame's base space is at floor level: the stage, or local-floor where host.json picked it. This is what the
+  // frame's baseIsStage tells IWER ("the base origin is on the floor"; it places local-floor by it).
   bool baseIsFloor() const { return floorSpace_ != XR_NULL_HANDLE || stageSpace_ != XR_NULL_HANDLE; }
+  // bounded-floor can be offered: the stage is the base space. IWER makes bounded-floor the base space itself with
+  // the stage bounds around its origin, so over a local-floor base (the user's starting point, not the play area's
+  // centre) it would put the play-area rectangle in the wrong place: there it is not offered at all.
+  bool boundedFloor() const { return stageSpace_ != XR_NULL_HANDLE && floorSpace_ == XR_NULL_HANDLE; }
   // host.json xr.baseSpace "local-floor": XR_EXT_local_floor as the base instead of the stage (before createSession).
   void setPreferLocalFloor(bool v) { preferLocalFloor_ = v; }
   bool stageBounds(float& w, float& d) const { w = boundsW_; d = boundsD_; return boundsW_ > 0; }
