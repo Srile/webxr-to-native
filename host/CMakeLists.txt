@@ -127,7 +127,7 @@ if(ANDROID)
   # WP-08: Oboe (AAudio) for the WebAudio device stream. Its cmake_minimum_required(3.4.1) predates CMake 4's floor.
   set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
   add_subdirectory(${TP}/oboe oboe)
-  target_link_libraries(webxrhost native_app_glue openxr_loader v8 android log EGL GLESv3 oboe host_webp host_opus host_web_features)
+  target_link_libraries(webxrhost native_app_glue openxr_loader v8 android log EGL GLESv3 mediandk oboe host_webp host_opus host_web_features)
   if(HOST_WEBRTC)
     host_enable_webrtc(webxrhost)
   endif()
@@ -304,7 +304,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT HOST_TESTS)
     list(FILTER LINUX_XR_SOURCES EXCLUDE REGEX "/emu/emu_xr\\.cpp$")
     add_executable(webxrhost-linux-xr ${LINUX_XR_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/linux/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/linux/xr_glue.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/emu/glfw_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/net/http_curl.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/xr/openxr_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_scene.cpp)
+      ${CMAKE_CURRENT_SOURCE_DIR}/xr/openxr_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_input.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_scene.cpp ${CMAKE_CURRENT_SOURCE_DIR}/xr/xr_render_models.cpp)
     # The pinned OpenXR headers (third_party/openxr, 1.1.49) ahead of the distribution's; the loader is the system's.
     target_include_directories(webxrhost-linux-xr BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs ${TP}/openxr/include)
     get_target_property(_defs webxrhost-linux COMPILE_DEFINITIONS)
@@ -509,12 +509,15 @@ if((IOS OR CMAKE_SYSTEM_NAME STREQUAL "visionOS") AND NOT HOST_TESTS)
 endif()
 
 if(HOST_TESTS)
+  # The tests check with assert(), so NDEBUG must not reach them: libwebp's CMakeLists makes Release the default
+  # build type (in the cache, for the whole project) and Release defines NDEBUG.
+  add_compile_options(-UNDEBUG)
   add_executable(json_test tests/json_test.cpp core/json.cpp)
   target_include_directories(json_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_executable(loop_test tests/loop_test.cpp core/loop.cpp)
   target_include_directories(loop_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   # WP-08: the audio graph's DSP, rendered offline on the Mac.
-  add_executable(audio_test tests/audio_test.cpp audio/graph.cpp audio/analyser.cpp audio/context.cpp audio/offline.cpp audio/decode.cpp audio/webm.cpp audio/mp3.cpp)
+  add_executable(audio_test tests/audio_test.cpp audio/graph.cpp audio/analyser.cpp audio/context.cpp audio/offline.cpp audio/decode.cpp audio/webm.cpp audio/mp3.cpp audio/aac.cpp)
   target_include_directories(audio_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb ${TP}/dr_libs)
   find_package(Threads REQUIRED)
   target_link_libraries(audio_test Threads::Threads host_opus)
@@ -527,6 +530,10 @@ if(HOST_TESTS)
   add_executable(image_test tests/image_test.cpp img/decode.cpp)
   target_include_directories(image_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TP}/stb)
   target_link_libraries(image_test host_webp host_web_features)
+  # The runtime's controller models (xr.renderModels): slots and generations over a fake OpenXR runtime.
+  add_executable(render_models_test tests/render_models_test.cpp xr/xr_render_models.cpp)
+  target_include_directories(render_models_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(render_models_test SYSTEM PRIVATE ${TP}/openxr/include)
   # WP-26: the SQLite store under IndexedDB and the Cache API (no V8), when tools/setup-storage.sh has fetched SQLite.
   if(EXISTS ${TP}/sqlite/sqlite3.c)
     host_sqlite_library()

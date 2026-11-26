@@ -28,6 +28,11 @@ const char* decodableCodecs();
 AudioBufferData* decodeMp3(const uint8_t* bytes, size_t len, std::string* err);
 bool mp3Built();
 
+// AAC in MP4 / M4A or ADTS (audio/aac.cpp): the platform's decoder (Android MediaCodec); aacBuilt() false elsewhere.
+bool isAac(const uint8_t* bytes, size_t len);
+AudioBufferData* decodeAac(const uint8_t* bytes, size_t len, std::string* err);
+bool aacBuilt();
+
 class DecodeWorker {
  public:
   using Done = std::function<void(AudioBufferData*, std::string err)>;

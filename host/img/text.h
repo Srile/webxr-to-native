@@ -1,6 +1,7 @@
 #pragma once
 // Canvas 2D text: TrueType / OpenType faces through stb_truetype, no V8. The page's own fonts arrive as bytes
-// (FontFace); generic families fall back to one sans-serif face of the platform. Text is UTF-16 as JS holds it.
+// (FontFace); generic families fall back to one sans-serif face of the platform, and code points neither has to the
+// platform's symbol and CJK faces (text.cpp kTiers). Text is UTF-16 as JS holds it.
 // Glyphs are placed one after another with the face's kerning; no shaping (ligatures, complex scripts). A code
 // point the face lacks is taken from the fallback face. JS thread only.
 #include <cstddef>
@@ -27,8 +28,11 @@ bool textMeasure(int font, int fallback, float px, float spacing, const uint16_t
 // Coverage of s[0, n) with the pen starting at device point (ox, oy) on the baseline, at an em of px scaled by
 // (scaleX, scaleY). Writes w, h and the device pixel (x0, y0) of the box's top left; fills alpha (w * h, rows
 // top-down) only when cap holds it. False when nothing is inked or alpha is too small (then w * h is the size).
+// Colour emoji (the platform's CBDT font) are not in alpha: when the text has any, color is set and their pictures
+// go to rgba (w * h * 4, straight alpha), which must then hold that much (else false, as for alpha).
 bool textRaster(int font, int fallback, float px, float spacing, float scaleX, float scaleY, float ox, float oy,
-                const uint16_t* s, size_t n, uint8_t* alpha, size_t cap, int& w, int& h, int& x0, int& y0);
+                const uint16_t* s, size_t n, uint8_t* alpha, size_t cap, int& w, int& h, int& x0, int& y0,
+                uint8_t* rgba, size_t rgbaCap, bool& color);
 
 }  // namespace img
 }  // namespace host

@@ -1,0 +1,47 @@
+--- a/src/impl/tlstransport.cpp
++++ b/src/impl/tlstransport.cpp
+@@ -416,15 +416,26 @@
+ 
+ 	PLOG_VERBOSE << "Send size=" << message->size();
+ 
+-	int ret;
+-	do {
+-		std::lock_guard lock(mSslMutex);
+-		ret = mbedtls_ssl_write(&mSsl, reinterpret_cast<const unsigned char *>(message->data()),
+-		                        int(message->size()));
+-	} while (ret == MBEDTLS_ERR_SSL_WANT_WRITE);
++	// mbedtls_ssl_write writes at most one record (MBEDTLS_SSL_OUT_CONTENT_LEN, 16 KiB by default) and returns
++	// how much it took: write the rest too, or a larger message (a WebSocket frame) loses its tail and the
++	// peer reads whatever is sent next as the missing bytes. One message at a time: a WebSocket pong sent from
++	// the receive thread between two of its records would land inside the frame.
++	std::lock_guard sendLock(mSendMutex);
++	auto data = reinterpret_cast<const unsigned char *>(message->data());
++	size_t left = message->size();
++	while (left > 0) {
++		int ret;
++		do {
++			std::lock_guard lock(mSslMutex);
++			ret = mbedtls_ssl_write(&mSsl, data, left);
++		} while (ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+ 
+-	if (!mbedtls::check(ret))
+-		throw std::runtime_error("TLS send failed");
++		if (!mbedtls::check(ret) || ret == 0)
++			throw std::runtime_error("TLS send failed");
++
++		data += ret;
++		left -= size_t(ret);
++	}
+ 
+ 	return mOutgoingResult;
+ }
+--- a/src/impl/tlstransport.hpp
++++ b/src/impl/tlstransport.hpp
+@@ -74,6 +74,7 @@
+ 	mbedtls_x509_crt mCaChain; // webxr-host: the system's CAs (RTC_CA_PATH), for verifying a server
+ 
+ 	std::recursive_mutex mSslMutex;
++	std::mutex mSendMutex; // webxr-host: one message's records at a time (send writes them one by one)
+ 	std::atomic<bool> mOutgoingResult = true;
+ 
+ 	message_ptr mIncomingMessage;

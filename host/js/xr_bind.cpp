@@ -91,6 +91,42 @@ void xrSceneEntities(const v8::FunctionCallbackInfo<v8::Value>& a) {
   }
   a.GetReturnValue().Set(arr);
 }
+// The runtime's controller models (xr/xr_render_models.h): [{ slot, id, hand: 0 left | 1 right | -1, glb: ArrayBuffer,
+// nodes: [animatable node names] }], read again when the pose record's generation changes.
+void xrRenderModels(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext();
+  v8::Local<v8::Array> arr = v8::Array::New(iso);
+  if (!g_svc->xr) { a.GetReturnValue().Set(arr); return; }
+  const auto& models = g_svc->xr->renderModels().models();
+  for (size_t i = 0; i < models.size(); ++i) {
+    const RenderModelEntry& e = models[i];
+    v8::Local<v8::Object> o = v8::Object::New(iso);
+    bind::setNum(ctx, o, "slot", (double)i); bind::setNum(ctx, o, "hand", e.hand); bind::setStr(ctx, o, "id", std::to_string(e.id));
+    auto ab = v8::ArrayBuffer::New(iso, e.glb.size()); if (!e.glb.empty()) memcpy(ab->GetBackingStore()->Data(), e.glb.data(), e.glb.size());
+    bind::set(ctx, o, "glb", ab);
+    v8::Local<v8::Array> names = v8::Array::New(iso, (int)e.nodes.size());
+    for (size_t n = 0; n < e.nodes.size(); ++n) names->Set(ctx, (uint32_t)n, bind::str(iso, e.nodes[n].c_str())).Check();
+    bind::set(ctx, o, "nodes", names);
+    arr->Set(ctx, (uint32_t)i, o).Check();
+  }
+  a.GetReturnValue().Set(arr);
+}
+// Their pose record, rewritten every frame: Float32Array over the device's own buffer (no copy).
+v8::Global<v8::Float32Array> g_renderModelPoses;
+void xrRenderModelPoses(const v8::FunctionCallbackInfo<v8::Value>& a) {
+  v8::Isolate* iso = a.GetIsolate();
+  if (!g_svc->xr || !g_svc->xr->renderModels().enabled()) { a.GetReturnValue().SetNull(); return; }
+  constexpr size_t len = XrRenderModels::kHeader + XrRenderModels::kMaxModels * XrRenderModels::kStride;
+  if (g_renderModelPoses.IsEmpty()) {
+#ifdef V8_ENABLE_SANDBOX
+    auto store = v8::ArrayBuffer::NewBackingStore(iso, len * sizeof(float));  // the sandboxed (Windows) build has no runtime models
+#else
+    auto store = v8::ArrayBuffer::NewBackingStore((void*)g_svc->xr->renderModels().poseRecord(), len * sizeof(float), [](void*, size_t, void*) {}, nullptr);
+#endif
+    g_renderModelPoses.Reset(iso, v8::Float32Array::New(v8::ArrayBuffer::New(iso, std::move(store)), 0, len));
+  }
+  a.GetReturnValue().Set(g_renderModelPoses.Get(iso));
+}
 void xrState(const v8::FunctionCallbackInfo<v8::Value>& a) {
   v8::Isolate* iso = a.GetIsolate(); v8::Local<v8::Context> ctx = iso->GetCurrentContext(); v8::Local<v8::Object> o = v8::Object::New(iso);
   bool running = g_svc->xr && g_svc->xr->sessionRunning(); XrSessionState st = g_svc->xr ? g_svc->xr->state() : XR_SESSION_STATE_UNKNOWN;
@@ -107,6 +143,7 @@ void installXr(v8::Local<v8::Context> ctx, v8::Local<v8::Object> native, HostSer
   bind::fn(ctx, xr, "setFoveation", xrSetFoveation); bind::fn(ctx, xr, "vibrate", xrVibrate); bind::fn(ctx, xr, "state", xrState);
   bind::fn(ctx, xr, "caps", xrCaps); bind::fn(ctx, xr, "setPassthrough", xrSetPassthrough); bind::fn(ctx, xr, "requestSceneCapture", xrRequestSceneCapture);
   bind::fn(ctx, xr, "sceneRefresh", xrSceneRefresh); bind::fn(ctx, xr, "scenePoses", xrScenePoses); bind::fn(ctx, xr, "sceneEntities", xrSceneEntities);
+  bind::fn(ctx, xr, "renderModels", xrRenderModels); bind::fn(ctx, xr, "renderModelPoses", xrRenderModelPoses);
 }
 
 bool xrHasFrameCallback() { return !g_onFrame.IsEmpty(); }

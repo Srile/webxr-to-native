@@ -60,7 +60,9 @@ async function run() {
     const hz = peak * ctx.sampleRate / an.fftSize, bin = ctx.sampleRate / an.fftSize
     check('the tone comes out at its frequency (debug.micTone)', Math.abs(hz - tone) <= bin, `peak ${hz.toFixed(1)} Hz at ${f[peak].toFixed(1)} dB, tone ${tone} Hz, bin ${bin.toFixed(1)} Hz`)
   }
-  const a = measure(an); await sleep(200); const b = measure(an)
+  // Not 200 ms: a debug.micTone of 440 Hz repeats every 1200 samples, and 200 ms (9600 samples, 75 render quanta) is a
+  // whole number of both, so the two windows came out identical and the check failed on a tone.
+  const a = measure(an); await sleep(230); const b = measure(an)
   const freq = new Float32Array(an.frequencyBinCount); an.getFloatFrequencyData(freq)
   check('analyser data changes', (a.first !== b.first || a.last !== b.last) && freq.some((v) => Number.isFinite(v)), `first ${a.first.toExponential(2)} -> ${b.first.toExponential(2)}`)
 

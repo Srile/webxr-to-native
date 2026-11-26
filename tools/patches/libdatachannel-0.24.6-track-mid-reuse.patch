@@ -1,0 +1,13 @@
+--- a/src/impl/peerconnection.cpp
++++ b/src/impl/peerconnection.cpp
+@@ -828,7 +828,9 @@
+ 		track->setDescription(std::move(description));
+ 	} else {
+ 		track = std::make_shared<Track>(weak_from_this(), std::move(description));
+-		mTracks.emplace(std::make_pair(track->mid(), track));
++		// A track of this mid that is gone (destroyed or closed) is replaced: emplace kept it, and the new track
++		// was then never found by its mid, so the answer rejected its m-line (port 0).
++		mTracks.insert_or_assign(track->mid(), track);
+ 		mTrackLines.emplace_back(track);
+ 	}
+ 

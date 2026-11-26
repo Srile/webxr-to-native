@@ -42,6 +42,6 @@ android {
     }
     packagingOptions { jniLibs { useLegacyPackaging false; pickFirsts += ['**/libc++_shared.so'] } }
     androidResources { noCompress 'glb', 'ktx2', 'ogg', 'opus', 'webm', 'mp3', 'wasm', 'bin', 'js', 'json', 'png', 'ttf', 'txt' }
-    sourceSets { main { jniLibs.srcDirs += ['../../third_party/v8/lib', '../../third_party/openxr/lib']; if (!hostPhone && file('../../third_party/ovr_platform_sdk/Android/libs').exists()) jniLibs.srcDirs += ['../../third_party/ovr_platform_sdk/Android/libs']; if (hostPhone) { manifest.srcFile 'src/phone/AndroidManifest.xml'; res.srcDirs += ['src/phone/res'] } } }
+    sourceSets { main { jniLibs.srcDirs += ['../../third_party/v8/lib', '../../third_party/openxr/lib', 'build/host-jni']; if (!hostPhone && file('../../third_party/ovr_platform_sdk/Android/libs').exists()) jniLibs.srcDirs += ['../../third_party/ovr_platform_sdk/Android/libs']; if (hostPhone) { manifest.srcFile 'src/phone/AndroidManifest.xml'; res.srcDirs += ['src/phone/res'] } } }
 }
 androidComponents { onVariants(selector().all()) { variant -> if (hostMicrophone) variant.sources.manifests.addStaticManifestFile(file('src/microphone/AndroidManifest.xml').absolutePath) } }
